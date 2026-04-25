@@ -10,7 +10,7 @@ const swaggerSpec = swaggerJsdoc({
     },
     servers: [
       {
-        url: 'http://localhost:3000',
+        url: 'http://localhost:7000',
         description: 'Local development server'
       }
     ],
@@ -248,6 +248,28 @@ const swaggerSpec = swaggerJsdoc({
             metadata: { type: 'object' }
           }
         },
+        MessageLog: {
+          type: 'object',
+          properties: {
+            id: { type: 'string' },
+            waMessageId: { type: 'string', nullable: true },
+            sessionId: { type: 'string' },
+            apiClientId: { type: 'string', nullable: true },
+            direction: { type: 'string', enum: ['inbound', 'outbound'] },
+            chatId: { type: 'string' },
+            fromId: { type: 'string', nullable: true },
+            toId: { type: 'string', nullable: true },
+            type: { type: 'string', example: 'chat' },
+            body: { type: 'string', nullable: true, description: 'Truncated according to MESSAGE_LOG_BODY_MAX_LENGTH or null when body storage is disabled.' },
+            hasMedia: { type: 'boolean' },
+            status: { type: 'string', example: 'sent' },
+            error: { type: 'string', nullable: true },
+            requestId: { type: 'string', nullable: true },
+            createdAt: { type: 'string', format: 'date-time' },
+            sentAt: { type: 'string', format: 'date-time', nullable: true },
+            receivedAt: { type: 'string', format: 'date-time', nullable: true }
+          }
+        },
         ApiClientCreateRequest: {
           type: 'object',
           required: ['name', 'allowedSessions', 'scopes'],
@@ -445,6 +467,20 @@ const swaggerSpec = swaggerJsdoc({
           parameters: [{ $ref: '#/components/parameters/SessionId' }],
           requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/SendTextRequest' } } } },
           responses: { 201: { description: 'Message sent' } }
+        }
+      },
+      '/sessions/{sessionId}/messages/logs': {
+        get: {
+          tags: ['Messages'],
+          summary: 'List persisted message logs for a session',
+          parameters: [
+            { $ref: '#/components/parameters/SessionId' },
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 1000, example: 100 } },
+            { name: 'chatId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'direction', in: 'query', required: false, schema: { type: 'string', enum: ['inbound', 'outbound'] } },
+            { name: 'status', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: { 200: { description: 'Message logs', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/MessageLog' } } } } } }
         }
       },
       '/sessions/{sessionId}/messages/reply': {
@@ -1127,6 +1163,54 @@ const swaggerSpec = swaggerJsdoc({
               content: { 'text/event-stream': { schema: { type: 'string' } } }
             }
           }
+        }
+      },
+      '/admin/usage-logs': {
+        get: {
+          tags: ['Admin'],
+          summary: 'List API usage logs from PostgreSQL',
+          security: [{ AdminKeyAuth: [] }],
+          parameters: [
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 1000, example: 100 } },
+            { name: 'clientId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'statusCode', in: 'query', required: false, schema: { type: 'integer' } },
+            { name: 'scopeUsed', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: { 200: { description: 'API usage logs' }, 401: { description: 'Invalid admin API key' } }
+        }
+      },
+      '/admin/message-logs': {
+        get: {
+          tags: ['Admin'],
+          summary: 'List persisted message logs from PostgreSQL',
+          security: [{ AdminKeyAuth: [] }],
+          parameters: [
+            { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 1000, example: 100 } },
+            { name: 'sessionId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'apiClientId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'chatId', in: 'query', required: false, schema: { type: 'string' } },
+            { name: 'direction', in: 'query', required: false, schema: { type: 'string', enum: ['inbound', 'outbound'] } },
+            { name: 'status', in: 'query', required: false, schema: { type: 'string' } }
+          ],
+          responses: { 200: { description: 'Message logs', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/MessageLog' } } } } }, 401: { description: 'Invalid admin API key' } }
+        }
+      },
+      '/admin/persistence/health': {
+        get: {
+          tags: ['Admin'],
+          summary: 'Get persistence health',
+          security: [{ AdminKeyAuth: [] }],
+          responses: { 200: { description: 'Persistence health' }, 401: { description: 'Invalid admin API key' } }
+        }
+      },
+      '/admin/retention/cleanup': {
+        post: {
+          tags: ['Admin'],
+          summary: 'Run PostgreSQL retention cleanup',
+          security: [{ AdminKeyAuth: [] }],
+          requestBody: { required: false, content: { 'application/json': { schema: { type: 'object', properties: { apiUsageDays: { type: 'integer', example: 90 }, auditDays: { type: 'integer', example: 180 }, webhookDeliveryDays: { type: 'integer', example: 90 }, messageLogDays: { type: 'integer', example: 90 } } } } } },
+          responses: { 200: { description: 'Retention cleanup result' }, 401: { description: 'Invalid admin API key' } }
         }
       },
       '/metrics': {

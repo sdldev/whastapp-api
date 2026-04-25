@@ -53,7 +53,7 @@ Contoh `.env` production:
 
 ```env
 NODE_ENV=production
-PORT=3000
+PORT=7000
 API_KEY=replace-with-legacy-fallback-secret
 ADMIN_API_KEY=replace-with-admin-dashboard-secret
 ALLOW_ANONYMOUS_ACCESS=false
@@ -137,7 +137,7 @@ npm start
 ### 5.4 Verifikasi Health
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:7000/health
 ```
 
 ### 5.5 Verifikasi Swagger
@@ -145,7 +145,7 @@ curl http://localhost:3000/health
 Swagger hanya tersedia bila `ENABLE_API_DOCS=true`. Untuk production, default-nya nonaktif; verifikasi docs hanya dari network/admin environment yang aman.
 
 ```txt
-http://localhost:3000/api-docs
+http://localhost:7000/api-docs
 ```
 
 ## 6. Session Operation
@@ -153,7 +153,7 @@ http://localhost:3000/api-docs
 ### 6.1 Start Session
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/start \
+curl -X POST http://localhost:7000/sessions/default/start \
   -H "Content-Type: application/json" \
   -H "x-api-key: replace-with-long-random-secret" \
   -d '{}'
@@ -162,7 +162,7 @@ curl -X POST http://localhost:3000/sessions/default/start \
 ### 6.2 Ambil QR
 
 ```bash
-curl http://localhost:3000/sessions/default/qr \
+curl http://localhost:7000/sessions/default/qr \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
@@ -171,7 +171,7 @@ Scan QR dari WhatsApp mobile.
 ### 6.3 Cek Status
 
 ```bash
-curl http://localhost:3000/sessions/default/status \
+curl http://localhost:7000/sessions/default/status \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
@@ -192,6 +192,47 @@ disconnected
 destroyed
 error
 ```
+
+### 6.4 Real Test Kirim Pesan
+
+Prosedur real test operasional:
+
+1. Start session khusus test, misalnya `realtest-62895624273377`.
+2. Ambil QR dan scan dari WhatsApp mobile nomor pengirim.
+3. Poll status sampai `ready`.
+4. Kirim pesan test ke nomor tujuan.
+5. Simpan message ID dari response untuk audit/troubleshooting.
+
+Contoh request:
+
+```bash
+curl -X POST http://localhost:7000/sessions/realtest-62895624273377/messages/text \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: replace-with-long-random-secret" \
+  -d '{
+    "to": "+62 857-8302-4799",
+    "message": "Real test WhatsApp API"
+  }'
+```
+
+Hasil real test 2026-04-25:
+
+```txt
+sessionId: realtest-62895624273377
+sender: 62895624273377@c.us
+target: 6285783024799@c.us
+status before send: ready
+send response: HTTP 201
+message id: true_6285783024799@c.us_3EB016E9DAF796C47C4CE9
+```
+
+Kriteria sukses:
+
+- HTTP response `201`.
+- Envelope response `success=true`.
+- `data.fromMe=true`.
+- `data.from` sama dengan nomor pengirim login.
+- `data.to` sama dengan chat ID target ternormalisasi.
 
 ## 7. Shutdown Procedure
 
@@ -259,7 +300,7 @@ Gunakan Nginx, Caddy, Traefik, atau load balancer untuk TLS.
 Contoh mapping:
 
 ```txt
-https://whatsapp-api.example.com -> http://127.0.0.1:3000
+https://whatsapp-api.example.com -> http://127.0.0.1:7000
 ```
 
 ### 8.4 Payload Limit
@@ -319,7 +360,7 @@ Catatan:
 ### 10.1 Register Webhook
 
 ```bash
-curl -X POST http://localhost:3000/webhooks \
+curl -X POST http://localhost:7000/webhooks \
   -H "Content-Type: application/json" \
   -H "x-api-key: replace-with-long-random-secret" \
   -d '{
@@ -373,10 +414,10 @@ Jika target webhook gagal, service akan retry sesuai konfigurasi dan menulis del
 Delivery log dapat dicek dan diretry manual:
 
 ```bash
-curl http://localhost:3000/webhooks/<webhookId>/deliveries \
+curl http://localhost:7000/webhooks/<webhookId>/deliveries \
   -H "x-api-key: replace-with-client-api-key"
 
-curl -X POST http://localhost:3000/webhooks/deliveries/<deliveryId>/retry \
+curl -X POST http://localhost:7000/webhooks/deliveries/<deliveryId>/retry \
   -H "x-api-key: replace-with-client-api-key"
 ```
 
@@ -457,28 +498,28 @@ GET /sessions/:sessionId/status
 ### 13.1 Restart Session
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/restart \
+curl -X POST http://localhost:7000/sessions/default/restart \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
 ### 13.2 Logout Session
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/logout \
+curl -X POST http://localhost:7000/sessions/default/logout \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
 ### 13.3 Destroy Session Runtime
 
 ```bash
-curl -X DELETE http://localhost:3000/sessions/default \
+curl -X DELETE http://localhost:7000/sessions/default \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
 ### 13.4 List Sessions
 
 ```bash
-curl http://localhost:3000/sessions \
+curl http://localhost:7000/sessions \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 
@@ -495,7 +536,7 @@ Kemungkinan:
 Langkah:
 
 ```bash
-curl http://localhost:3000/sessions/default/status \
+curl http://localhost:7000/sessions/default/status \
   -H "x-api-key: replace-with-long-random-secret"
 ```
 

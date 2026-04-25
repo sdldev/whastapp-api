@@ -23,19 +23,19 @@ Raw client API key hanya ditampilkan sekali saat create/rotate. Backend hanya me
 Development default:
 
 ```txt
-http://localhost:3000
+http://localhost:7000
 ```
 
 Swagger/OpenAPI tersedia di non-production secara default:
 
 ```txt
-http://localhost:3000/api-docs
+http://localhost:7000/api-docs
 ```
 
 OpenAPI JSON:
 
 ```txt
-http://localhost:3000/api-docs.json
+http://localhost:7000/api-docs.json
 ```
 
 Di production, docs default nonaktif kecuali backend diset `ENABLE_API_DOCS=true`.
@@ -143,7 +143,7 @@ Rekomendasi UI setelah create:
 - Tombol `Download .env` dengan isi:
 
 ```env
-WHATSAPP_API_BASE_URL=http://localhost:3000
+WHATSAPP_API_BASE_URL=http://localhost:7000
 WHATSAPP_API_KEY=wa_sk_live_cli_xxx_secret
 ```
 
@@ -257,7 +257,7 @@ x-api-key: <generated-api-key>
 Contoh:
 
 ```bash
-curl -X POST http://localhost:3000/sessions/sales/messages/text \
+curl -X POST http://localhost:7000/sessions/sales/messages/text \
   -H "Content-Type: application/json" \
   -H "x-api-key: wa_sk_live_cli_xxx_secret" \
   -d '{
@@ -268,7 +268,56 @@ curl -X POST http://localhost:3000/sessions/sales/messages/text \
 
 Jika key valid, scope cukup, dan session diizinkan, request diproses.
 
-## 11. Rate Limit Headers
+## 11. Flow Frontend untuk Real Test Pengiriman
+
+Untuk dashboard atau API client UI, real test pengiriman pesan sebaiknya mengikuti state machine berikut:
+
+1. User memilih atau membuat `sessionId`.
+2. Frontend memanggil `POST /sessions/:sessionId/start`.
+3. Frontend polling `GET /sessions/:sessionId/status`.
+4. Jika status `qr`, frontend mengambil `GET /sessions/:sessionId/qr` lalu menampilkan `data.qrDataUrl` sebagai gambar QR.
+5. Setelah user scan QR, frontend lanjut polling sampai status `ready`.
+6. Tombol kirim pesan hanya aktif saat session `ready`.
+7. Frontend memanggil `POST /sessions/:sessionId/messages/text`.
+8. Tampilkan sukses jika HTTP `201`, `success=true`, dan `data.fromMe=true`.
+
+Contoh payload real test yang sudah berhasil diverifikasi pada 2026-04-25:
+
+```json
+{
+  "sessionId": "realtest-62895624273377",
+  "from": "62895624273377@c.us",
+  "to": "+62 857-8302-4799",
+  "normalizedTo": "6285783024799@c.us",
+  "message": "Real test WhatsApp API",
+  "expectedHttpStatus": 201
+}
+```
+
+Contoh response sukses yang dapat dipakai frontend untuk assertion:
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "true_6285783024799@c.us_3EB016E9DAF796C47C4CE9",
+    "from": "62895624273377@c.us",
+    "to": "6285783024799@c.us",
+    "type": "chat",
+    "hasMedia": false,
+    "fromMe": true
+  }
+}
+```
+
+Catatan implementasi frontend:
+
+- Jangan menampilkan API key generated setelah halaman ditutup; key hanya tampil sekali saat create/rotate.
+- Jangan aktifkan tombol send sebelum session `ready`.
+- Nomor tujuan boleh dikirim dengan `+`, spasi, atau tanda baca; backend akan menormalisasi ke format WhatsApp chat ID.
+- Tampilkan error validasi dari envelope standar `error.code`, `error.message`, dan `error.details`.
+
+## 12. Rate Limit Headers
 
 Generated API client mendapat rate limit per menit.
 
@@ -303,7 +352,7 @@ HTTP status: `429`.
 
 Catatan: rate limit HTTP berbeda dengan delay pengiriman WhatsApp. Pengiriman message/media tetap memiliki gate minimal 5 detik per session dan send queue bounded. Jika pending queue per session penuh, backend mengembalikan `SEND_QUEUE_FULL` dengan HTTP 429.
 
-## 12. Scope List
+## 13. Scope List
 
 Scope yang tersedia:
 
@@ -441,7 +490,7 @@ Scope yang dibutuhkan: `events:read` dan session harus masuk `allowedSessions`.
 ["*"]
 ```
 
-## 13. Session Access
+## 14. Session Access
 
 `allowedSessions` membatasi session WhatsApp yang boleh dipakai client.
 
@@ -475,7 +524,7 @@ Jika client mencoba session lain:
 }
 ```
 
-## 14. Error Codes Penting untuk Frontend
+## 15. Error Codes Penting untuk Frontend
 
 | Code | HTTP | Meaning | UI Action |
 |---|---:|---|---|
@@ -492,7 +541,7 @@ Jika client mencoba session lain:
 | `SESSION_INITIALIZE_TIMEOUT` | 504 | Start/restore session timeout | Tampilkan retry dan cek Chromium/server resource |
 | `VALIDATION_ERROR` | 400 | Payload invalid | Tampilkan validasi field |
 
-## 15. Storage dan Audit
+## 16. Storage dan Audit
 
 Generated API client disimpan di:
 
@@ -522,7 +571,7 @@ GET /admin/audit-logs?limit=100&actorId=cli_xxx&sessionId=default&action=message
 
 File ini untuk backend/ops, bukan untuk frontend langsung.
 
-## 16. Checklist Frontend
+## 17. Checklist Frontend
 
 - Buat halaman API Clients.
 - Buat form Create API Client.

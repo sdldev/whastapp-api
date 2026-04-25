@@ -55,7 +55,7 @@ npm start
 Default server berjalan di:
 
 ```txt
-http://localhost:3000
+http://localhost:7000
 ```
 
 ## Script Tersedia
@@ -78,7 +78,7 @@ Buat file `.env` jika diperlukan.
 
 ```env
 NODE_ENV=development
-PORT=3000
+PORT=7000
 API_KEY=your-legacy-secret-key
 ADMIN_API_KEY=your-admin-secret
 ALLOW_ANONYMOUS_ACCESS=false
@@ -123,7 +123,7 @@ AUDIT_LOG_FILE=data/audit.log
 
 | Variable | Default | Keterangan |
 |---|---:|---|
-| `PORT` | `3000` | Port HTTP server |
+| `PORT` | `7000` | Port HTTP server |
 | `API_KEY` | kosong | Legacy API key global. Di production legacy key default nonaktif kecuali `ENABLE_LEGACY_API_KEY=true`; gunakan generated API client key untuk kontrol scope/session/rate limit |
 | `ADMIN_API_KEY` | kosong | Admin key khusus untuk endpoint `/admin/*`; tidak fallback ke `API_KEY` |
 | `ALLOW_ANONYMOUS_ACCESS` | `false` | Jika `true`, protected route boleh anonymous saat tidak ada API key. Jangan aktifkan di production |
@@ -183,7 +183,7 @@ x-api-key: wa_sk_live_cli_xxx_secret
 Contoh:
 
 ```bash
-curl http://localhost:3000/sessions \
+curl http://localhost:7000/sessions \
   -H "x-api-key: wa_sk_live_cli_xxx_secret"
 ```
 
@@ -242,13 +242,13 @@ Audit log disimpan sebagai JSON Lines di `AUDIT_LOG_FILE`. Field sensitif sepert
 Swagger UI tersedia di non-production secara default:
 
 ```txt
-http://localhost:3000/api-docs
+http://localhost:7000/api-docs
 ```
 
 Raw OpenAPI JSON tersedia di:
 
 ```txt
-http://localhost:3000/api-docs.json
+http://localhost:7000/api-docs.json
 ```
 
 Di production, docs default nonaktif. Aktifkan eksplisit dengan `ENABLE_API_DOCS=true` atau lindungi lewat reverse proxy/admin network.
@@ -290,13 +290,13 @@ Dokumentasi Swagger mencakup endpoint session, messages, media, mentions, contac
 ### 1. Health Check
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:7000/health
 ```
 
 ### 2. Start Session
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/start \
+curl -X POST http://localhost:7000/sessions/default/start \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{}'
@@ -305,7 +305,7 @@ curl -X POST http://localhost:3000/sessions/default/start \
 ### 3. Ambil QR
 
 ```bash
-curl http://localhost:3000/sessions/default/qr \
+curl http://localhost:7000/sessions/default/qr \
   -H "x-api-key: your-secret-key"
 ```
 
@@ -314,7 +314,7 @@ Scan QR menggunakan aplikasi WhatsApp mobile.
 ### 4. Cek Status Session
 
 ```bash
-curl http://localhost:3000/sessions/default/status \
+curl http://localhost:7000/sessions/default/status \
   -H "x-api-key: your-secret-key"
 ```
 
@@ -334,7 +334,7 @@ error
 ### 5. Kirim Pesan Teks
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/messages/text \
+curl -X POST http://localhost:7000/sessions/default/messages/text \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{
@@ -342,6 +342,43 @@ curl -X POST http://localhost:3000/sessions/default/messages/text \
     "message": "Halo dari WhatsApp API"
   }'
 ```
+
+### 6. Real Test Pengiriman Pesan
+
+Checklist manual/integrasi yang sudah diverifikasi pada 2026-04-25:
+
+1. Jalankan server API.
+2. Start session dengan session ID khusus real test.
+3. Ambil QR dari `GET /sessions/:sessionId/qr`.
+4. Scan QR menggunakan WhatsApp mobile nomor pengirim.
+5. Polling `GET /sessions/:sessionId/status` sampai `status` bernilai `ready`.
+6. Kirim pesan dengan `POST /sessions/:sessionId/messages/text`.
+7. Pastikan response HTTP `201` dan `data.fromMe` bernilai `true`.
+
+Contoh data real test yang berhasil:
+
+```txt
+sessionId: realtest-62895624273377
+from: 62895624273377@c.us
+to: 6285783024799@c.us
+status: ready
+send response: HTTP 201
+message id: true_6285783024799@c.us_3EB016E9DAF796C47C4CE9
+```
+
+Contoh request pengiriman:
+
+```bash
+curl -X POST http://localhost:7000/sessions/realtest-62895624273377/messages/text \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: your-secret-key" \
+  -d '{
+    "to": "+62 857-8302-4799",
+    "message": "Real test WhatsApp API"
+  }'
+```
+
+Catatan: nomor tujuan dapat dikirim dalam format lokal/internasional dengan spasi atau tanda `+`; API akan menormalisasi ke chat ID WhatsApp seperti `6285783024799@c.us`.
 
 ## Endpoint Ringkas
 
@@ -549,7 +586,7 @@ ALL /sessions/:sessionId/communities/*
 ### Register Webhook
 
 ```bash
-curl -X POST http://localhost:3000/webhooks \
+curl -X POST http://localhost:7000/webhooks \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{
@@ -587,17 +624,17 @@ Jika webhook memiliki `secret`, request webhook akan menyertakan header signatur
 Webhook juga memiliki delivery log dan retry manual:
 
 ```bash
-curl http://localhost:3000/webhooks/<webhookId>/deliveries \
+curl http://localhost:7000/webhooks/<webhookId>/deliveries \
   -H "x-api-key: your-secret-key"
 
-curl -X POST http://localhost:3000/webhooks/deliveries/<deliveryId>/retry \
+curl -X POST http://localhost:7000/webhooks/deliveries/<deliveryId>/retry \
   -H "x-api-key: your-secret-key"
 ```
 
 Untuk dashboard realtime, frontend dapat memakai Server-Sent Events:
 
 ```bash
-curl -N http://localhost:3000/sessions/default/events \
+curl -N http://localhost:7000/sessions/default/events \
   -H "x-api-key: your-secret-key"
 ```
 
@@ -620,7 +657,7 @@ queue:manage
 ## Contoh Send Media URL
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/media/url \
+curl -X POST http://localhost:7000/sessions/default/media/url \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{
@@ -633,7 +670,7 @@ curl -X POST http://localhost:3000/sessions/default/media/url \
 ## Contoh Mention User
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/mentions/users \
+curl -X POST http://localhost:7000/sessions/default/mentions/users \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{
@@ -646,7 +683,7 @@ curl -X POST http://localhost:3000/sessions/default/mentions/users \
 ## Contoh Mention Everyone
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/groups/120363000000000000@g.us/mention-everyone \
+curl -X POST http://localhost:7000/sessions/default/groups/120363000000000000@g.us/mention-everyone \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{

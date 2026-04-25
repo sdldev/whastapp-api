@@ -46,7 +46,7 @@ npm start
 Default URL:
 
 ```txt
-http://localhost:3000
+http://localhost:7000
 ```
 
 ## Script
@@ -63,7 +63,7 @@ Contoh `.env`:
 
 ```env
 NODE_ENV=development
-PORT=3000
+PORT=7000
 API_KEY=your-legacy-secret-key
 ADMIN_API_KEY=your-admin-secret
 ALLOW_ANONYMOUS_ACCESS=false
@@ -140,13 +140,13 @@ GET /health/ready
 Swagger UI tersedia bila `ENABLE_API_DOCS=true`:
 
 ```txt
-http://localhost:3000/api-docs
+http://localhost:7000/api-docs
 ```
 
 OpenAPI JSON:
 
 ```txt
-http://localhost:3000/api-docs.json
+http://localhost:7000/api-docs.json
 ```
 
 Di production, `ENABLE_API_DOCS` default `false`.
@@ -162,7 +162,7 @@ x-api-key: your-secret-key
 Contoh:
 
 ```bash
-curl http://localhost:3000/sessions \
+curl http://localhost:7000/sessions \
   -H "x-api-key: your-secret-key"
 ```
 
@@ -171,13 +171,13 @@ curl http://localhost:3000/sessions \
 ### 1. Health Check
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:7000/health
 ```
 
 ### 2. Start Session
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/start \
+curl -X POST http://localhost:7000/sessions/default/start \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{}'
@@ -186,21 +186,21 @@ curl -X POST http://localhost:3000/sessions/default/start \
 ### 3. Ambil QR
 
 ```bash
-curl http://localhost:3000/sessions/default/qr \
+curl http://localhost:7000/sessions/default/qr \
   -H "x-api-key: your-secret-key"
 ```
 
 ### 4. Cek Status
 
 ```bash
-curl http://localhost:3000/sessions/default/status \
+curl http://localhost:7000/sessions/default/status \
   -H "x-api-key: your-secret-key"
 ```
 
 ### 5. Kirim Pesan
 
 ```bash
-curl -X POST http://localhost:3000/sessions/default/messages/text \
+curl -X POST http://localhost:7000/sessions/default/messages/text \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{
@@ -208,6 +208,33 @@ curl -X POST http://localhost:3000/sessions/default/messages/text \
     "message": "Halo dari WhatsApp API"
   }'
 ```
+
+### 6. Real Test Pengiriman
+
+Real test live yang berhasil diverifikasi pada 2026-04-25:
+
+```txt
+sessionId: realtest-62895624273377
+from: 62895624273377@c.us
+to: 6285783024799@c.us
+status: ready
+send response: HTTP 201
+message id: true_6285783024799@c.us_3EB016E9DAF796C47C4CE9
+```
+
+Contoh request:
+
+```bash
+curl -X POST http://localhost:7000/sessions/realtest-62895624273377/messages/text \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: your-secret-key" \
+  -d '{
+    "to": "+62 857-8302-4799",
+    "message": "Real test WhatsApp API"
+  }'
+```
+
+Pastikan session sudah `ready` sebelum request kirim pesan dijalankan.
 
 ## Ringkasan Endpoint
 
@@ -331,7 +358,7 @@ message.reaction
 Register webhook:
 
 ```bash
-curl -X POST http://localhost:3000/webhooks \
+curl -X POST http://localhost:7000/webhooks \
   -H "Content-Type: application/json" \
   -H "x-api-key: your-secret-key" \
   -d '{

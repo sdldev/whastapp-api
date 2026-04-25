@@ -331,6 +331,35 @@ async function main() {
     assert.deepStrictEqual(adminSpec.tags.map((tag) => tag.name), ['Admin']);
   });
 
+  await runTest('app allows same-origin Swagger UI requests when API docs are enabled', () => {
+    const originalEnableApiDocs = env.enableApiDocs;
+    const originalCorsOrigins = env.corsOrigins;
+    const originalPort = env.port;
+    const originalUse = Array.prototype.push;
+    let corsOptions;
+
+    try {
+      env.enableApiDocs = true;
+      env.corsOrigins = ['http://localhost:7001'];
+      env.port = 7000;
+      Array.prototype.push = function patchedPush(layer) {
+        if (layer && layer.handle && layer.handle.name === 'corsMiddleware' && layer.handle.length === 3) {
+          corsOptions = layer.handle;
+        }
+        return originalUse.call(this, layer);
+      };
+      delete require.cache[require.resolve('../src/app')];
+      require('../src/app');
+      assert.ok(corsOptions);
+    } finally {
+      Array.prototype.push = originalUse;
+      delete require.cache[require.resolve('../src/app')];
+      env.enableApiDocs = originalEnableApiDocs;
+      env.corsOrigins = originalCorsOrigins;
+      env.port = originalPort;
+    }
+  });
+
   await runTest('scope mapping covers production reliability endpoints', () => {
     assert.strictEqual(apiClientService.getRequiredScope('GET', '/metrics'), 'metrics:read');
     assert.strictEqual(apiClientService.getRequiredScope('GET', '/sessions/default/messages/logs'), 'messages:read');

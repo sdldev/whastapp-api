@@ -33,6 +33,7 @@ app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
     if (!origin || env.corsOrigins.includes('*') || env.corsOrigins.includes(origin)) return callback(null, true);
+    if (env.enableApiDocs && origin === `http://localhost:${env.port}`) return callback(null, true);
     return callback(new Error('Not allowed by CORS'));
   }
 }));

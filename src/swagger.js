@@ -1,6 +1,6 @@
 const swaggerJsdoc = require('swagger-jsdoc');
 
-const swaggerSpec = swaggerJsdoc({
+const baseSwaggerSpec = swaggerJsdoc({
   definition: {
     openapi: '3.0.3',
     info: {
@@ -1341,4 +1341,46 @@ const swaggerSpec = swaggerJsdoc({
   apis: []
 });
 
-module.exports = swaggerSpec;
+function cloneSpec(spec) {
+  return JSON.parse(JSON.stringify(spec));
+}
+
+function filterPaths(paths, predicate) {
+  return Object.fromEntries(
+    Object.entries(paths || {}).filter(([path]) => predicate(path))
+  );
+}
+
+function filterTags(tags, allowedNames) {
+  return (tags || []).filter((tag) => allowedNames.has(tag.name));
+}
+
+function createSwaggerSpec({ includeAdmin }) {
+  const spec = cloneSpec(baseSwaggerSpec);
+  const isAdminPath = (path) => path.startsWith('/admin/');
+
+  spec.paths = filterPaths(spec.paths, includeAdmin ? isAdminPath : (path) => !isAdminPath(path));
+
+  if (includeAdmin) {
+    spec.info.title = 'WhatsApp API Admin Interface';
+    spec.info.description = 'Internal admin API untuk generate API client, audit, usage, message logs, persistence health, dan retention cleanup.';
+    spec.tags = filterTags(spec.tags, new Set(['Admin']));
+    spec.security = [{ AdminKeyAuth: [] }];
+    delete spec.components.securitySchemes.ApiKeyAuth;
+    return spec;
+  }
+
+  spec.info.title = 'WhatsApp API User Interface';
+  spec.info.description = 'User-facing REST API berbasis whatsapp-web.js untuk session auth, messaging, media, contacts, chats, groups, channels, queue, metrics, dan webhooks.';
+  spec.tags = filterTags(spec.tags, new Set((spec.tags || []).map((tag) => tag.name).filter((name) => name !== 'Admin')));
+  delete spec.components.securitySchemes.AdminKeyAuth;
+  return spec;
+}
+
+const userSwaggerSpec = createSwaggerSpec({ includeAdmin: false });
+const adminSwaggerSpec = createSwaggerSpec({ includeAdmin: true });
+
+module.exports = userSwaggerSpec;
+module.exports.baseSwaggerSpec = baseSwaggerSpec;
+module.exports.userSwaggerSpec = userSwaggerSpec;
+module.exports.adminSwaggerSpec = adminSwaggerSpec;

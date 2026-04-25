@@ -4,7 +4,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const swaggerUi = require('swagger-ui-express');
 const env = require('./config/env');
-const swaggerSpec = require('./swagger');
+const swaggerSpecs = require('./swagger');
 const apiKeyMiddleware = require('./middlewares/apiKey.middleware');
 const errorMiddleware = require('./middlewares/error.middleware');
 const notFoundMiddleware = require('./middlewares/notFound.middleware');
@@ -41,14 +41,23 @@ app.use(express.urlencoded({ extended: true, limit: env.jsonBodyLimit }));
 app.use(morgan(env.nodeEnv === 'development' ? 'dev' : 'combined'));
 
 if (env.enableApiDocs) {
-  app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  app.get('/api-docs.json', (req, res) => res.json(swaggerSpecs.userSwaggerSpec));
+  app.use('/api-docs', swaggerUi.serveFiles(swaggerSpecs.userSwaggerSpec), swaggerUi.setup(swaggerSpecs.userSwaggerSpec, {
     explorer: true,
-    customSiteTitle: 'WhatsApp API Documentation'
+    customSiteTitle: 'WhatsApp API User Documentation'
   }));
 }
 
 app.use('/health', healthRoutes);
+
+if (env.enableApiDocs) {
+  app.get('/admin/api-docs.json', adminKeyMiddleware, (req, res) => res.json(swaggerSpecs.adminSwaggerSpec));
+  app.use('/admin/api-docs', adminKeyMiddleware, swaggerUi.serveFiles(swaggerSpecs.adminSwaggerSpec), swaggerUi.setup(swaggerSpecs.adminSwaggerSpec, {
+    explorer: true,
+    customSiteTitle: 'WhatsApp API Admin Documentation'
+  }));
+}
+
 app.use('/admin', adminKeyMiddleware, adminRoutes);
 app.use(apiKeyMiddleware);
 app.use('/metrics', metricsRoutes);

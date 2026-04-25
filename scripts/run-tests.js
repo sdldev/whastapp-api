@@ -28,6 +28,7 @@ const auditLogService = require('../src/services/auditLog.service');
 const webhookService = require('../src/services/webhook.service');
 const sendQueue = require('../src/services/sendQueue.service');
 const apiKeyMiddleware = require('../src/middlewares/apiKey.middleware');
+const validate = require('../src/middlewares/validate.middleware');
 const { assertSafeOutboundUrl, isPrivateAddress } = require('../src/utils/outboundUrl');
 const messageCache = require('../src/store/messageCache.store');
 const clientManager = require('../src/services/clientManager.service');
@@ -289,6 +290,45 @@ async function main() {
     assert.strictEqual(log.status, 'failed');
     assert.strictEqual(log.requestId, 'req-test');
     assert.strictEqual(log.hasMedia, false);
+  });
+
+  await runTest('validate middleware defaults missing body/query/params to empty objects', async () => {
+    const schema = require('../src/schemas/session.schema').sessionOnlySchema;
+    const req = { params: { sessionId: 'default' } };
+
+    await new Promise((resolve, reject) => {
+      validate(schema)(req, {}, (error) => {
+        try {
+          assert.ifError(error);
+          assert.deepStrictEqual(req.validated.query, {});
+          assert.deepStrictEqual(req.validated.body, {});
+          assert.strictEqual(req.validated.params.sessionId, 'default');
+          resolve();
+        } catch (assertionError) {
+          reject(assertionError);
+        }
+      });
+    });
+  });
+
+  await runTest('swagger specs separate user and admin contracts', () => {
+    const swaggerSpecs = require('../src/swagger');
+    const userSpec = swaggerSpecs.userSwaggerSpec;
+    const adminSpec = swaggerSpecs.adminSwaggerSpec;
+
+    assert.ok(userSpec.paths['/sessions']);
+    assert.ok(userSpec.paths['/webhooks']);
+    assert.strictEqual(userSpec.paths['/admin/api-clients'], undefined);
+    assert.ok(userSpec.components.securitySchemes.ApiKeyAuth);
+    assert.strictEqual(userSpec.components.securitySchemes.AdminKeyAuth, undefined);
+    assert.ok(!userSpec.tags.some((tag) => tag.name === 'Admin'));
+
+    assert.ok(adminSpec.paths['/admin/api-clients']);
+    assert.ok(adminSpec.paths['/admin/audit-logs']);
+    assert.strictEqual(adminSpec.paths['/sessions'], undefined);
+    assert.ok(adminSpec.components.securitySchemes.AdminKeyAuth);
+    assert.strictEqual(adminSpec.components.securitySchemes.ApiKeyAuth, undefined);
+    assert.deepStrictEqual(adminSpec.tags.map((tag) => tag.name), ['Admin']);
   });
 
   await runTest('scope mapping covers production reliability endpoints', () => {

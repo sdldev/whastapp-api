@@ -1,9 +1,9 @@
 function validate(schema) {
   return function validateRequest(req, res, next) {
     const result = schema.safeParse({
-      params: req.params,
-      query: req.query,
-      body: req.body
+      params: req.params || {},
+      query: req.query || {},
+      body: req.body || {}
     });
 
     if (!result.success) return next(result.error);

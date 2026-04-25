@@ -1380,7 +1380,8 @@ function createSwaggerSpec({ includeAdmin }) {
 const userSwaggerSpec = createSwaggerSpec({ includeAdmin: false });
 const adminSwaggerSpec = createSwaggerSpec({ includeAdmin: true });
 
-module.exports = userSwaggerSpec;
-module.exports.baseSwaggerSpec = baseSwaggerSpec;
-module.exports.userSwaggerSpec = userSwaggerSpec;
-module.exports.adminSwaggerSpec = adminSwaggerSpec;
+module.exports = {
+  baseSwaggerSpec,
+  userSwaggerSpec,
+  adminSwaggerSpec
+};

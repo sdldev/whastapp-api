@@ -3,13 +3,36 @@ const sendQueue = require('./sendQueue.service');
 const messageCache = require('../store/messageCache.store');
 const { normalizeChatId } = require('../utils/normalizeWhatsappId');
 const { AppError } = require('../utils/errors');
+const messageLogService = require('./messageLog.service');
 
-async function sendText(sessionId, { to, message, options = {} }) {
+async function sendText(sessionId, { to, message, options = {} }, context = {}) {
   const client = clientManager.ensureReady(sessionId);
   const chatId = normalizeChatId(to);
-  const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(chatId, message, options));
-  messageCache.setMessage(sent);
-  return messageCache.serializeMessage(sent);
+  try {
+    const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(chatId, message, options));
+    messageCache.setMessage(sent);
+    await messageLogService.logOutboundSuccess({
+      sessionId,
+      chatId,
+      message,
+      sent,
+      actor: context.actor,
+      requestId: context.requestId,
+      type: 'chat'
+    });
+    return messageCache.serializeMessage(sent);
+  } catch (error) {
+    await messageLogService.logOutboundFailure({
+      sessionId,
+      chatId,
+      message,
+      error,
+      actor: context.actor,
+      requestId: context.requestId,
+      type: 'chat'
+    });
+    throw error;
+  }
 }
 
 async function reply(sessionId, { messageId, message }) {
@@ -161,8 +184,13 @@ async function sendPresenceUnavailable(sessionId) {
   return { presence: 'unavailable' };
 }
 
+async function listMessageLogs(filters = {}) {
+  return messageLogService.listMessageLogs(filters);
+}
+
 module.exports = {
   sendText,
+  listMessageLogs,
   reply,
   react,
   forward,

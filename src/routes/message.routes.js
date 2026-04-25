@@ -14,13 +14,21 @@ const {
   searchMessagesSchema,
   chatActionSchema,
   presenceSchema,
-  sessionPresenceSchema
+  sessionPresenceSchema,
+  messageLogsQuerySchema
 } = require('../schemas/message.schema');
 
 const router = express.Router({ mergeParams: true });
 
 router.post('/text', validate(sendTextSchema), asyncHandler(async (req, res) => {
-  return success(res, await messageService.sendText(req.params.sessionId, req.body), 201);
+  return success(res, await messageService.sendText(req.params.sessionId, req.body, {
+    actor: req.apiClient ? { authMode: 'api-client', clientId: req.apiClient.id } : { authMode: req.authMode },
+    requestId: req.get('x-request-id') || null
+  }), 201);
+}));
+
+router.get('/logs', validate(messageLogsQuerySchema), asyncHandler(async (req, res) => {
+  return success(res, await messageService.listMessageLogs({ ...req.query, sessionId: req.params.sessionId }));
 }));
 
 router.post('/reply', validate(replySchema), asyncHandler(async (req, res) => {

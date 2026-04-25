@@ -3,6 +3,9 @@ dist/
 # generated types
 .astro/
 .obsidian/
+.wwebjs_auth/
+.wwebjs_cache/
+data/
 copilot/
 # dependencies
 node_modules/

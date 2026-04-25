@@ -17,6 +17,7 @@ process.env.MESSAGE_CACHE_TTL_MS = '60000';
 process.env.WEBHOOK_DELIVERY_CONCURRENCY = '1';
 process.env.WEBHOOK_DELIVERY_MAX_QUEUE = '10';
 process.env.WEBHOOK_MAX_CONSECUTIVE_FAILURES = '1';
+process.env.PERSISTENCE_DRIVER = 'file';
 process.env.SESSION_INITIALIZE_TIMEOUT_MS = '1000';
 process.env.SESSION_RESTORE_CONCURRENCY = '2';
 process.env.JSONL_LOG_MAX_BYTES = '1024';
@@ -30,7 +31,9 @@ const apiKeyMiddleware = require('../src/middlewares/apiKey.middleware');
 const { assertSafeOutboundUrl, isPrivateAddress } = require('../src/utils/outboundUrl');
 const messageCache = require('../src/store/messageCache.store');
 const clientManager = require('../src/services/clientManager.service');
+const messageLogService = require('../src/services/messageLog.service');
 const env = require('../src/config/env');
+const persistence = require('../src/services/persistence.service');
 const { appendJsonLine } = require('../src/utils/jsonlFile');
 
 async function runTest(name, fn) {
@@ -130,8 +133,8 @@ async function main() {
     });
   });
 
-  await runTest('audit log redacts sensitive fields and filters entries', () => {
-    auditLogService.appendAuditLog({
+  await runTest('audit log redacts sensitive fields and filters entries', async () => {
+    await auditLogService.appendAuditLog({
       actorType: 'api_client',
       actorId: 'cli_test',
       action: 'messages:send',
@@ -146,7 +149,7 @@ async function main() {
       }
     });
 
-    const entries = auditLogService.listAuditLogs({ actorId: 'cli_test', sessionId: 'default', limit: 10 });
+    const entries = await auditLogService.listAuditLogs({ actorId: 'cli_test', sessionId: 'default', limit: 10 });
     assert.strictEqual(entries.length, 1);
     assert.strictEqual(entries[0].metadata.body.data, '[REDACTED]');
     assert.strictEqual(entries[0].metadata.body.apiKey, '[REDACTED]');
@@ -163,10 +166,22 @@ async function main() {
     await assert.rejects(() => assertSafeOutboundUrl('file:///tmp/test'), /HTTP or HTTPS/);
   });
 
+  await runTest('persistence initializes file mode without postgres and exposes health', async () => {
+    await persistence.initPersistence();
+    assert.strictEqual(persistence.isPostgresConfigured(), false);
+    assert.strictEqual(persistence.isPostgresEnabled(), false);
+    const health = await persistence.getHealth();
+    assert.strictEqual(health.driver, 'file');
+    assert.strictEqual(health.postgres.enabled, false);
+    await persistence.closePersistence();
+  });
+
   await runTest('advanced health hides stored session ids by default', async () => {
     const clientManager = require('../src/services/clientManager.service');
     const health = await clientManager.getAdvancedHealth();
     assert.ok(health.storedSessions);
+    assert.ok(health.persistence);
+    assert.strictEqual(health.persistence.driver, 'file');
     assert.strictEqual(Object.prototype.hasOwnProperty.call(health.storedSessions, 'sessionIds'), false);
   });
 
@@ -181,15 +196,15 @@ async function main() {
 
     assert.strictEqual(webhook.ownerClientId, 'cli_owner');
     assert.strictEqual(webhook.hasSecret, true);
-    assert.strictEqual(webhookService.listWebhooks(actor).length, 1);
-    assert.strictEqual(webhookService.listWebhooks(other).length, 0);
-    assert.throws(() => webhookService.getWebhook(webhook.id, other), /not allowed/);
+    assert.strictEqual((await webhookService.listWebhooks(actor)).length, 1);
+    assert.strictEqual((await webhookService.listWebhooks(other)).length, 0);
+    await assert.rejects(() => webhookService.getWebhook(webhook.id, other), /not allowed/);
 
     const updated = await webhookService.updateWebhook(webhook.id, { active: false, events: ['*'] }, actor);
     assert.strictEqual(updated.active, false);
     assert.deepStrictEqual(updated.events, ['*']);
 
-    assert.strictEqual(webhookService.deleteWebhook(webhook.id, actor), true);
+    assert.strictEqual(await webhookService.deleteWebhook(webhook.id, actor), true);
   });
 
   await runTest('send queue state pause resume max pending and metrics summary', async () => {
@@ -230,12 +245,14 @@ async function main() {
     assert.ok(messageCache.getMessage('msg_3'));
   });
 
-  await runTest('webhook delivery queue exposes bounded state', () => {
+  await runTest('webhook delivery queue exposes bounded state and dispatch remains async-safe', async () => {
     const queueState = webhookService.getDeliveryQueueState();
     assert.strictEqual(queueState.concurrency, 1);
     assert.strictEqual(queueState.maxQueue, 10);
     assert.ok(queueState.queued >= 0);
     assert.ok(queueState.active >= 0);
+
+    await webhookService.dispatch('message.received', 'default', { id: 'msg-test' });
   });
 
   await runTest('session timeout and log rotation helpers are configured', async () => {
@@ -255,8 +272,28 @@ async function main() {
     assert.ok(fs.statSync(rotatingLog).size < env.jsonlLogMaxBytes + 256);
   });
 
+  await runTest('message log builder truncates body and preserves metadata', () => {
+    const longBody = 'x'.repeat(env.messageLogBodyMaxLength + 25);
+    const log = messageLogService.buildOutboundLog({
+      sessionId: 'default',
+      chatId: '6281234567890@c.us',
+      message: longBody,
+      status: 'failed',
+      error: new Error('send failed'),
+      actor: { authMode: 'api-client', clientId: 'cli_test' },
+      requestId: 'req-test'
+    });
+
+    assert.strictEqual(log.apiClientId, 'cli_test');
+    assert.strictEqual(log.body.length, env.messageLogBodyMaxLength);
+    assert.strictEqual(log.status, 'failed');
+    assert.strictEqual(log.requestId, 'req-test');
+    assert.strictEqual(log.hasMedia, false);
+  });
+
   await runTest('scope mapping covers production reliability endpoints', () => {
     assert.strictEqual(apiClientService.getRequiredScope('GET', '/metrics'), 'metrics:read');
+    assert.strictEqual(apiClientService.getRequiredScope('GET', '/sessions/default/messages/logs'), 'messages:read');
     assert.strictEqual(apiClientService.getRequiredScope('GET', '/sessions/default/queue'), 'queue:read');
     assert.strictEqual(apiClientService.getRequiredScope('POST', '/sessions/default/queue/pause'), 'queue:manage');
     assert.strictEqual(apiClientService.getRequiredScope('GET', '/sessions/default/groups/group@g.us/membership-requests'), 'groups:membership:read');

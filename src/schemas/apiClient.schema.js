@@ -51,9 +51,49 @@ const auditLogQuerySchema = z.object({
   body: z.object({}).passthrough()
 });
 
+const logQueryFields = {
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  clientId: z.string().min(1).max(120).optional(),
+  apiClientId: z.string().min(1).max(120).optional(),
+  sessionId: z.string().min(1).max(64).optional(),
+  chatId: z.string().min(1).optional(),
+  direction: z.enum(['inbound', 'outbound']).optional(),
+  status: z.string().min(1).max(40).optional(),
+  statusCode: z.coerce.number().int().min(100).max(599).optional(),
+  scopeUsed: z.string().min(1).max(160).optional(),
+  fromDate: z.string().datetime().optional(),
+  toDate: z.string().datetime().optional()
+};
+
+const usageLogQuerySchema = z.object({
+  params: z.object({}).passthrough(),
+  query: z.object(logQueryFields),
+  body: z.object({}).passthrough()
+});
+
+const messageLogAdminQuerySchema = z.object({
+  params: z.object({}).passthrough(),
+  query: z.object(logQueryFields),
+  body: z.object({}).passthrough()
+});
+
+const retentionCleanupSchema = z.object({
+  params: z.object({}).passthrough(),
+  query: z.object({}).passthrough(),
+  body: z.object({
+    apiUsageDays: z.number().int().min(1).max(3650).optional(),
+    auditDays: z.number().int().min(1).max(3650).optional(),
+    webhookDeliveryDays: z.number().int().min(1).max(3650).optional(),
+    messageLogDays: z.number().int().min(1).max(3650).optional()
+  }).default({})
+});
+
 module.exports = {
   apiClientCreateSchema,
   apiClientUpdateSchema,
   apiClientParamSchema,
-  auditLogQuerySchema
+  auditLogQuerySchema,
+  usageLogQuerySchema,
+  messageLogAdminQuerySchema,
+  retentionCleanupSchema
 };

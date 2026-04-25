@@ -1,5 +1,6 @@
 const { randomUUID } = require('crypto');
 const env = require('../config/env');
+const persistence = require('./persistence.service');
 const { appendJsonLine, readJsonLines } = require('../utils/jsonlFile');
 
 const auditLogFile = env.auditLogFile;
@@ -43,7 +44,7 @@ function redactObject(input) {
   return output;
 }
 
-function appendAuditLog(entry) {
+async function appendAuditLog(entry) {
   try {
     const payload = {
       id: entry.id || `audit_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
@@ -62,6 +63,47 @@ function appendAuditLog(entry) {
       requestId: entry.requestId || null,
       metadata: redactObject(entry.metadata || {})
     };
+
+    if (persistence.isPostgresEnabled()) {
+      await persistence.query(
+        `INSERT INTO audit_logs (
+          id,
+          created_at,
+          actor_type,
+          actor_id,
+          api_key_id,
+          auth_mode,
+          action,
+          session_id,
+          method,
+          path,
+          status_code,
+          ip_address,
+          user_agent,
+          request_id,
+          metadata
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+        [
+          payload.id,
+          payload.createdAt,
+          payload.actorType,
+          payload.actorId,
+          payload.apiKeyId,
+          payload.authMode,
+          payload.action,
+          payload.sessionId,
+          payload.method,
+          payload.path,
+          payload.statusCode,
+          payload.ipAddress,
+          payload.userAgent,
+          payload.requestId,
+          JSON.stringify(payload.metadata)
+        ]
+      );
+      return payload;
+    }
+
     appendJsonLine(auditLogFile, payload);
     return payload;
   } catch (error) {
@@ -69,8 +111,60 @@ function appendAuditLog(entry) {
   }
 }
 
-function listAuditLogs({ limit = 100, actorId, sessionId, action, statusCode } = {}) {
+function auditLogFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    actorType: row.actor_type || null,
+    actorId: row.actor_id || null,
+    apiKeyId: row.api_key_id || null,
+    authMode: row.auth_mode || null,
+    action: row.action || null,
+    sessionId: row.session_id || null,
+    method: row.method || null,
+    path: row.path || null,
+    statusCode: row.status_code || null,
+    ipAddress: row.ip_address || null,
+    userAgent: row.user_agent || null,
+    requestId: row.request_id || null,
+    metadata: row.metadata || {}
+  };
+}
+
+async function listAuditLogs({ limit = 100, actorId, sessionId, action, statusCode } = {}) {
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
+
+  if (persistence.isPostgresEnabled()) {
+    const conditions = [];
+    const params = [];
+
+    if (actorId) {
+      params.push(actorId);
+      conditions.push(`actor_id = $${params.length}`);
+    }
+    if (sessionId) {
+      params.push(sessionId);
+      conditions.push(`session_id = $${params.length}`);
+    }
+    if (action) {
+      params.push(action);
+      conditions.push(`action = $${params.length}`);
+    }
+    if (statusCode) {
+      params.push(Number(statusCode));
+      conditions.push(`status_code = $${params.length}`);
+    }
+
+    params.push(safeLimit);
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const result = await persistence.query(
+      `SELECT * FROM audit_logs ${where} ORDER BY created_at DESC LIMIT $${params.length}`,
+      params
+    );
+    return result.rows.map(auditLogFromRow);
+  }
+
   const lines = readJsonLines(auditLogFile, { limit: Math.max(safeLimit * 10, 1000) });
   const entries = [];
 
@@ -126,7 +220,7 @@ function auditMiddleware(req, res, next) {
         query: req.query || {},
         body: req.method === 'GET' ? undefined : redactObject(req.body || {})
       }
-    });
+    }).catch(() => {});
   });
   next();
 }

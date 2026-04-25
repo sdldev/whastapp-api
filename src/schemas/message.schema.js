@@ -92,6 +92,20 @@ const sessionPresenceSchema = z.object({
   body: z.object({}).passthrough()
 });
 
+const messageLogsQuerySchema = z.object({
+  params: sessionParams,
+  query: z.object({
+    limit: z.coerce.number().int().min(1).max(1000).optional(),
+    apiClientId: z.string().min(1).max(120).optional(),
+    chatId: z.string().min(1).optional(),
+    direction: z.enum(['inbound', 'outbound']).optional(),
+    status: z.string().min(1).max(40).optional(),
+    fromDate: z.string().datetime().optional(),
+    toDate: z.string().datetime().optional()
+  }),
+  body: z.object({}).passthrough()
+});
+
 module.exports = {
   sendTextSchema,
   replySchema,
@@ -103,5 +117,6 @@ module.exports = {
   searchMessagesSchema,
   chatActionSchema,
   presenceSchema,
-  sessionPresenceSchema
+  sessionPresenceSchema,
+  messageLogsQuerySchema
 };

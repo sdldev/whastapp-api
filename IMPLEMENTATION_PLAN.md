@@ -71,3 +71,35 @@
 4. Start a WhatsApp session and confirm QR/status endpoints respond.
 5. Scan QR and confirm session becomes `ready`.
 6. Send text/media and verify webhook delivery when configured.
+
+## Real Test Result — 2026-04-25
+
+A live WhatsApp text-message integration test was executed successfully with the existing session lifecycle and messaging endpoints.
+
+Test data:
+
+```txt
+sessionId: realtest-62895624273377
+sender: 62895624273377@c.us
+target input: +62 857-8302-4799
+normalized target: 6285783024799@c.us
+session status: ready
+send endpoint: POST /sessions/:sessionId/messages/text
+send response: HTTP 201
+message id: true_6285783024799@c.us_3EB016E9DAF796C47C4CE9
+```
+
+Verified behavior:
+
+1. API server health endpoint returned success.
+2. Session start returned a QR login state.
+3. QR scan authenticated the sender account.
+4. Session status transitioned to `ready`.
+5. The text-message endpoint sent a message to the normalized target chat ID.
+6. Response confirmed `fromMe=true`, `hasMedia=false`, and sender/target chat IDs matched the expected values.
+
+Notes:
+
+- This test requires live WhatsApp connectivity and a user-scanned QR code; it is intentionally not part of automated `npm test`.
+- Automated tests should continue to avoid QR scan and live WhatsApp dependencies unless explicitly requested.
+- Future frontend real-test flows should display `qrDataUrl`, poll status until `ready`, and only enable sending after readiness is confirmed.

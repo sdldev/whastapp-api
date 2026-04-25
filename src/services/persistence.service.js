@@ -80,8 +80,13 @@ async function migratePostgres() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       owner_client_id TEXT NULL,
       created_at TIMESTAMPTZ NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL
+      updated_at TIMESTAMPTZ NOT NULL,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_failure_at TIMESTAMPTZ NULL
     );
+
+    ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS last_failure_at TIMESTAMPTZ NULL;
 
     CREATE TABLE IF NOT EXISTS api_usage_logs (
       id BIGSERIAL PRIMARY KEY,
@@ -133,11 +138,34 @@ async function migratePostgres() {
       retried_from TEXT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS message_logs (
+      id TEXT PRIMARY KEY,
+      wa_message_id TEXT NULL,
+      session_id TEXT NOT NULL,
+      api_client_id TEXT NULL,
+      direction TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      from_id TEXT NULL,
+      to_id TEXT NULL,
+      type TEXT NOT NULL DEFAULT 'chat',
+      body TEXT NULL,
+      has_media BOOLEAN NOT NULL DEFAULT FALSE,
+      status TEXT NOT NULL,
+      error TEXT NULL,
+      request_id TEXT NULL,
+      created_at TIMESTAMPTZ NOT NULL,
+      sent_at TIMESTAMPTZ NULL,
+      received_at TIMESTAMPTZ NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
     CREATE INDEX IF NOT EXISTS idx_api_usage_client_created ON api_usage_logs(client_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook ON webhook_deliveries(webhook_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_message_logs_session_created ON message_logs(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_message_logs_chat_created ON message_logs(chat_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_message_logs_api_client_created ON message_logs(api_client_id, created_at DESC);
   `);
 }
 
@@ -157,7 +185,8 @@ async function initRedis() {
 
 async function initPersistence() {
   if (initialized) return;
-  if (isPostgresEnabled()) {
+  if (isPostgresConfigured()) {
+    postgresAvailable = true;
     await migratePostgres();
     logger.info('Postgres persistence initialized');
   }
@@ -200,6 +229,39 @@ async function getHealth() {
   return { driver: env.persistenceDriver, postgres, redis };
 }
 
+async function cleanupRetention(options = {}) {
+  if (!isPostgresEnabled()) {
+    return {
+      driver: env.persistenceDriver,
+      skipped: true,
+      reason: 'Postgres persistence is not enabled',
+      deleted: {}
+    };
+  }
+
+  const retention = {
+    apiUsageDays: Number(options.apiUsageDays || env.retentionApiUsageDays),
+    auditDays: Number(options.auditDays || env.retentionAuditDays),
+    webhookDeliveryDays: Number(options.webhookDeliveryDays || env.retentionWebhookDeliveryDays),
+    messageLogDays: Number(options.messageLogDays || env.retentionMessageLogDays)
+  };
+
+  const deleted = {};
+  const statements = [
+    ['apiUsageLogs', 'DELETE FROM api_usage_logs WHERE created_at < NOW() - ($1::int * INTERVAL \'1 day\')', retention.apiUsageDays],
+    ['auditLogs', 'DELETE FROM audit_logs WHERE created_at < NOW() - ($1::int * INTERVAL \'1 day\')', retention.auditDays],
+    ['webhookDeliveries', 'DELETE FROM webhook_deliveries WHERE created_at < NOW() - ($1::int * INTERVAL \'1 day\')', retention.webhookDeliveryDays],
+    ['messageLogs', 'DELETE FROM message_logs WHERE created_at < NOW() - ($1::int * INTERVAL \'1 day\')', retention.messageLogDays]
+  ];
+
+  for (const [key, sql, days] of statements) {
+    const result = await query(sql, [days]);
+    deleted[key] = result.rowCount;
+  }
+
+  return { driver: env.persistenceDriver, skipped: false, retention, deleted };
+}
+
 async function closePersistence() {
   if (redisClient) {
     await redisClient.quit().catch(() => {});
@@ -209,6 +271,9 @@ async function closePersistence() {
     await pool.end().catch(() => {});
     pool = null;
   }
+  redisInitialized = false;
+  postgresAvailable = false;
+  initialized = false;
 }
 
 module.exports = {
@@ -216,6 +281,8 @@ module.exports = {
   closePersistence,
   query,
   getHealth,
+  cleanupRetention,
   isPostgresEnabled,
+  isPostgresConfigured,
   getRedisClient: () => redisClient
 };

@@ -147,7 +147,11 @@ function resumeSession(sessionId) {
 
 function getQueueSummary() {
   const states = listSessionSendStates();
+  const redisEnabled = env.queueDriver === 'redis';
   return {
+    driver: redisEnabled ? 'redis' : 'memory',
+    redisConfigured: Boolean(env.redisUrl || env.redisHost),
+    redisReady: Boolean(redisEnabled && require('./persistence.service').getRedisClient()),
     delayMs: env.sendMessageDelayMs,
     sessions: states.length,
     activeChains: states.filter((state) => state.queued).length,

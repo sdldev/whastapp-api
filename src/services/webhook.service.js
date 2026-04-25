@@ -9,6 +9,7 @@ const eventBus = require('./eventBus.service');
 const { AppError } = require('../utils/errors');
 const { assertSafeOutboundUrl } = require('../utils/outboundUrl');
 const { appendJsonLine, readJsonLines } = require('../utils/jsonlFile');
+const persistence = require('./persistence.service');
 
 const webhooks = new Map();
 const deliveryQueue = [];
@@ -24,6 +25,7 @@ function ensureDir(filePath) {
 }
 
 function ensureLoaded() {
+  if (persistence.isPostgresEnabled()) return;
   if (loaded) return;
   loaded = true;
 
@@ -42,12 +44,49 @@ function ensureLoaded() {
 }
 
 function persist() {
+  if (persistence.isPostgresEnabled()) return;
   try {
     ensureDir(env.webhookStoreFile);
     fs.writeFileSync(env.webhookStoreFile, JSON.stringify(Array.from(webhooks.values()), null, 2));
   } catch (error) {
     logger.error({ err: error, file: env.webhookStoreFile }, 'Failed to persist webhook store');
   }
+}
+
+function webhookFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    url: row.url,
+    events: row.events || [],
+    secret: row.secret || '',
+    active: row.active,
+    ownerClientId: row.owner_client_id || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+    consecutiveFailures: Number(row.consecutive_failures || 0),
+    lastFailureAt: row.last_failure_at ? (row.last_failure_at instanceof Date ? row.last_failure_at.toISOString() : row.last_failure_at) : null
+  };
+}
+
+function deliveryFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    webhookId: row.webhook_id,
+    ownerClientId: row.owner_client_id || null,
+    event: row.event,
+    sessionId: row.session_id || null,
+    payload: row.payload || {},
+    status: row.status,
+    attempts: row.attempts,
+    statusCode: row.status_code || null,
+    error: row.error || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+    deliveredAt: row.delivered_at ? (row.delivered_at instanceof Date ? row.delivered_at.toISOString() : row.delivered_at) : null,
+    failedAt: row.failed_at ? (row.failed_at instanceof Date ? row.failed_at.toISOString() : row.failed_at) : null,
+    retriedFrom: row.retried_from || null
+  };
 }
 
 function sanitize(webhook) {
@@ -59,6 +98,8 @@ function sanitize(webhook) {
     ownerClientId: webhook.ownerClientId || null,
     createdAt: webhook.createdAt,
     updatedAt: webhook.updatedAt,
+    consecutiveFailures: Number(webhook.consecutiveFailures || 0),
+    lastFailureAt: webhook.lastFailureAt || null,
     hasSecret: Boolean(webhook.secret)
   };
 }
@@ -86,31 +127,82 @@ async function createWebhook({ url, events, secret, active = true }, actor = {})
     active,
     ownerClientId: actor.authMode === 'api-client' ? actor.clientId : null,
     createdAt: nowIso(),
-    updatedAt: nowIso()
+    updatedAt: nowIso(),
+    consecutiveFailures: 0,
+    lastFailureAt: null
   };
+
+  if (persistence.isPostgresEnabled()) {
+    await persistence.query(
+      `INSERT INTO webhooks (
+        id,
+        url,
+        events,
+        secret,
+        active,
+        owner_client_id,
+        created_at,
+        updated_at,
+        consecutive_failures,
+        last_failure_at
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        webhook.id,
+        webhook.url,
+        JSON.stringify(webhook.events),
+        webhook.secret,
+        webhook.active,
+        webhook.ownerClientId,
+        webhook.createdAt,
+        webhook.updatedAt,
+        webhook.consecutiveFailures,
+        webhook.lastFailureAt
+      ]
+    );
+    return sanitize(webhook);
+  }
+
   webhooks.set(webhook.id, webhook);
   persist();
   return sanitize(webhook);
 }
 
-function listWebhooks(actor = {}) {
+async function listWebhooks(actor = {}) {
   ensureLoaded();
+  if (persistence.isPostgresEnabled()) {
+    const params = [];
+    let where = '';
+    if (actor && actor.authMode === 'api-client') {
+      params.push(actor.clientId);
+      where = 'WHERE owner_client_id IS NULL OR owner_client_id = $1';
+    }
+    const result = await persistence.query(`SELECT * FROM webhooks ${where} ORDER BY created_at DESC`, params);
+    return result.rows.map(webhookFromRow).map(sanitize);
+  }
+
   return Array.from(webhooks.values())
     .filter((webhook) => canAccessWebhook(actor, webhook))
     .map(sanitize);
 }
 
-function getWebhook(id, actor = {}) {
+async function getStoredWebhook(id) {
   ensureLoaded();
-  const webhook = webhooks.get(id);
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query('SELECT * FROM webhooks WHERE id = $1', [id]);
+    return webhookFromRow(result.rows[0]);
+  }
+  return webhooks.get(id) || null;
+}
+
+async function getWebhook(id, actor = {}) {
+  const webhook = await getStoredWebhook(id);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
   return sanitize(webhook);
 }
 
 async function updateWebhook(id, input, actor = {}) {
-  ensureLoaded();
-  const webhook = webhooks.get(id);
+  const webhook = await getStoredWebhook(id);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
 
@@ -120,18 +212,71 @@ async function updateWebhook(id, input, actor = {}) {
   if (input.active !== undefined) webhook.active = input.active;
   webhook.updatedAt = nowIso();
 
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query(
+      `UPDATE webhooks
+       SET url=$2, events=$3, secret=$4, active=$5, updated_at=$6
+       WHERE id=$1
+       RETURNING *`,
+      [webhook.id, webhook.url, JSON.stringify(webhook.events), webhook.secret, webhook.active, webhook.updatedAt]
+    );
+    return sanitize(webhookFromRow(result.rows[0]));
+  }
+
+  webhooks.set(webhook.id, webhook);
   persist();
   return sanitize(webhook);
 }
 
-function deleteWebhook(id, actor = {}) {
-  ensureLoaded();
-  const webhook = webhooks.get(id);
+async function deleteWebhook(id, actor = {}) {
+  const webhook = await getStoredWebhook(id);
   if (!webhook) return false;
   assertWebhookAccess(actor, webhook);
+
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query('DELETE FROM webhooks WHERE id = $1', [id]);
+    return result.rowCount > 0;
+  }
+
   const deleted = webhooks.delete(id);
   if (deleted) persist();
   return deleted;
+}
+
+async function saveWebhookFailureState(webhook) {
+  if (persistence.isPostgresEnabled()) {
+    await persistence.query(
+      `UPDATE webhooks
+       SET active=$2, consecutive_failures=$3, last_failure_at=$4, updated_at=$5
+       WHERE id=$1`,
+      [
+        webhook.id,
+        webhook.active,
+        Number(webhook.consecutiveFailures || 0),
+        webhook.lastFailureAt || null,
+        webhook.updatedAt || nowIso()
+      ]
+    );
+    return;
+  }
+  webhooks.set(webhook.id, webhook);
+  persist();
+}
+
+async function getDispatchWebhooks(event) {
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query(
+      `SELECT * FROM webhooks
+       WHERE active = TRUE AND (events ? $1 OR events ? '*')`,
+      [event]
+    );
+    return result.rows.map(webhookFromRow);
+  }
+
+  ensureLoaded();
+  return Array.from(webhooks.values())
+    .filter((webhook) => webhook.active)
+    .filter((webhook) => webhook.events.includes(event) || webhook.events.includes('*'));
 }
 
 function signPayload(secret, payload) {
@@ -155,15 +300,72 @@ function deliveryToPublic(delivery) {
   };
 }
 
-function appendDelivery(delivery) {
-  appendJsonLine(env.webhookDeliveryLogFile, delivery);
+async function appendDelivery(delivery) {
+  try {
+    if (persistence.isPostgresEnabled()) {
+      await persistence.query(
+        `INSERT INTO webhook_deliveries (
+          id,
+          webhook_id,
+          owner_client_id,
+          event,
+          session_id,
+          payload,
+          status,
+          attempts,
+          status_code,
+          error,
+          created_at,
+          delivered_at,
+          failed_at,
+          retried_from
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        ON CONFLICT (id) DO UPDATE SET
+          payload=EXCLUDED.payload,
+          status=EXCLUDED.status,
+          attempts=EXCLUDED.attempts,
+          status_code=EXCLUDED.status_code,
+          error=EXCLUDED.error,
+          delivered_at=EXCLUDED.delivered_at,
+          failed_at=EXCLUDED.failed_at,
+          retried_from=EXCLUDED.retried_from`,
+        [
+          delivery.id,
+          delivery.webhookId,
+          delivery.ownerClientId || null,
+          delivery.event,
+          delivery.sessionId || null,
+          JSON.stringify(delivery.payload || {}),
+          delivery.status,
+          delivery.attempts || 0,
+          delivery.statusCode || null,
+          delivery.error || null,
+          delivery.createdAt || nowIso(),
+          delivery.deliveredAt || null,
+          delivery.failedAt || null,
+          delivery.retriedFrom || null
+        ]
+      );
+      return;
+    }
+    appendJsonLine(env.webhookDeliveryLogFile, delivery);
+  } catch (error) {
+    logger.error({ err: error, deliveryId: delivery.id, webhookId: delivery.webhookId }, 'Failed to persist webhook delivery');
+  }
 }
 
-function listDeliveries(webhookId, actor = {}) {
-  ensureLoaded();
-  const webhook = webhooks.get(webhookId);
+async function listDeliveries(webhookId, actor = {}) {
+  const webhook = await getStoredWebhook(webhookId);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
+
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query(
+      'SELECT * FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY created_at DESC LIMIT 100',
+      [webhookId]
+    );
+    return result.rows.map(deliveryFromRow).map(deliveryToPublic);
+  }
 
   return readJsonLines(env.webhookDeliveryLogFile, { limit: 5000 })
     .filter((delivery) => delivery.webhookId === webhookId)
@@ -204,7 +406,7 @@ async function deliver(webhook, payload, existingDelivery = null) {
       delivery.statusCode = response.status;
       delivery.error = null;
       delivery.deliveredAt = nowIso();
-      appendDelivery(delivery);
+      await appendDelivery(delivery);
       return delivery;
     } catch (error) {
       lastError = error;
@@ -216,7 +418,7 @@ async function deliver(webhook, payload, existingDelivery = null) {
   delivery.status = 'failed';
   delivery.error = lastError?.message || 'Unknown webhook delivery error';
   delivery.failedAt = nowIso();
-  appendDelivery(delivery);
+  await appendDelivery(delivery);
   logger.error({ webhookId: webhook.id, event: payload.event, err: delivery.error }, 'Webhook delivery exhausted');
   return delivery;
 }
@@ -242,13 +444,13 @@ function processDeliveryQueue() {
     const job = deliveryQueue.shift();
     activeDeliveries += 1;
     deliver(job.webhook, job.payload, job.existingDelivery)
-      .then((delivery) => {
+      .then(async (delivery) => {
         updateWebhookFailureState(job.webhook, delivery.status === 'delivered');
-        persist();
+        await saveWebhookFailureState(job.webhook);
       })
-      .catch((error) => {
+      .catch(async (error) => {
         updateWebhookFailureState(job.webhook, false);
-        persist();
+        await saveWebhookFailureState(job.webhook);
         logger.error({ err: error, webhookId: job.webhook.id }, 'Unhandled webhook delivery queue error');
       })
       .finally(() => {
@@ -273,7 +475,7 @@ function enqueueDelivery(webhook, payload, existingDelivery = null) {
       failedAt: nowIso(),
       error: 'Webhook delivery queue is full'
     };
-    appendDelivery(delivery);
+    appendDelivery(delivery).catch(() => {});
     logger.warn({ webhookId: webhook.id, event: payload.event }, 'Webhook delivery dropped because queue is full');
     return delivery;
   }
@@ -303,8 +505,7 @@ function getDeliveryQueueState() {
   };
 }
 
-function dispatch(event, sessionId, data) {
-  ensureLoaded();
+async function dispatch(event, sessionId, data) {
   const payload = {
     event,
     sessionId,
@@ -314,18 +515,23 @@ function dispatch(event, sessionId, data) {
 
   eventBus.publish(event, sessionId, data);
 
-  for (const webhook of webhooks.values()) {
-    if (!webhook.active) continue;
-    if (!webhook.events.includes(event) && !webhook.events.includes('*')) continue;
+  const matchingWebhooks = await getDispatchWebhooks(event);
+  for (const webhook of matchingWebhooks) {
     enqueueDelivery(webhook, payload);
   }
 }
 
 async function retryDelivery(deliveryId, actor = {}) {
   ensureLoaded();
-  const delivery = readJsonLines(env.webhookDeliveryLogFile, { limit: 10000 }).find((item) => item.id === deliveryId);
+  let delivery;
+  if (persistence.isPostgresEnabled()) {
+    const result = await persistence.query('SELECT * FROM webhook_deliveries WHERE id = $1', [deliveryId]);
+    delivery = deliveryFromRow(result.rows[0]);
+  } else {
+    delivery = readJsonLines(env.webhookDeliveryLogFile, { limit: 10000 }).find((item) => item.id === deliveryId);
+  }
   if (!delivery) throw new AppError('Webhook delivery not found', 404, 'WEBHOOK_DELIVERY_NOT_FOUND');
-  const webhook = webhooks.get(delivery.webhookId);
+  const webhook = await getStoredWebhook(delivery.webhookId);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
 

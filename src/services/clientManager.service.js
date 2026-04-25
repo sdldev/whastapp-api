@@ -6,6 +6,8 @@ const { toDataUrl } = require('../utils/qr');
 const { AppError } = require('../utils/errors');
 const messageCache = require('../store/messageCache.store');
 const webhookService = require('./webhook.service');
+const persistence = require('./persistence.service');
+const messageLogService = require('./messageLog.service');
 
 const sessions = new Map();
 
@@ -94,6 +96,18 @@ async function findStoredSessionIds() {
   }
 }
 
+function dispatchWebhook(event, sessionId, data) {
+  webhookService.dispatch(event, sessionId, data).catch((error) => {
+    logger.error({ err: error, event, sessionId }, 'Webhook dispatch failed');
+  });
+}
+
+function appendMessageLog(sessionId, message) {
+  messageLogService.logIncomingMessage(sessionId, message).catch((error) => {
+    logger.warn({ err: error, sessionId }, 'Message log append failed');
+  });
+}
+
 function registerClientEvents(session) {
   const { client, sessionId } = session;
 
@@ -102,14 +116,14 @@ function registerClientEvents(session) {
     session.qr = qr;
     session.qrDataUrl = await toDataUrl(qr);
     logger.info({ sessionId }, 'WhatsApp QR received');
-    webhookService.dispatch('session.qr', sessionId, { qr, qrDataUrl: session.qrDataUrl });
+    dispatchWebhook('session.qr', sessionId, { qr, qrDataUrl: session.qrDataUrl });
   });
 
   client.on('authenticated', () => {
     session.status = 'authenticated';
     session.lastError = null;
     logger.info({ sessionId }, 'WhatsApp session authenticated');
-    webhookService.dispatch('session.authenticated', sessionId, publicSession(session));
+    dispatchWebhook('session.authenticated', sessionId, publicSession(session));
   });
 
   client.on('ready', () => {
@@ -119,14 +133,14 @@ function registerClientEvents(session) {
     session.qrDataUrl = null;
     session.me = client.info || null;
     logger.info({ sessionId }, 'WhatsApp client ready');
-    webhookService.dispatch('session.ready', sessionId, publicSession(session));
+    dispatchWebhook('session.ready', sessionId, publicSession(session));
   });
 
   client.on('auth_failure', (message) => {
     session.status = 'auth_failure';
     session.lastError = message || 'Authentication failed';
     logger.warn({ sessionId, message }, 'WhatsApp authentication failure');
-    webhookService.dispatch('session.auth_failure', sessionId, publicSession(session));
+    dispatchWebhook('session.auth_failure', sessionId, publicSession(session));
   });
 
   client.on('disconnected', (reason) => {
@@ -134,30 +148,32 @@ function registerClientEvents(session) {
     session.disconnectedAt = new Date().toISOString();
     session.lastError = reason || null;
     logger.warn({ sessionId, reason }, 'WhatsApp session disconnected');
-    webhookService.dispatch('session.disconnected', sessionId, publicSession(session));
+    dispatchWebhook('session.disconnected', sessionId, publicSession(session));
   });
 
   client.on('message', async (message) => {
     messageCache.setMessage(message);
+    appendMessageLog(sessionId, message);
     const serialized = messageCache.serializeMessage(message);
-    webhookService.dispatch('message.received', sessionId, serialized);
+    dispatchWebhook('message.received', sessionId, serialized);
 
     if (message.hasMedia) {
-      webhookService.dispatch('message.media', sessionId, serialized);
+      dispatchWebhook('message.media', sessionId, serialized);
     }
 
     if (message.type === 'location' || message.location) {
-      webhookService.dispatch('message.location', sessionId, serialized);
+      dispatchWebhook('message.location', sessionId, serialized);
     }
   });
 
   client.on('message_create', (message) => {
     messageCache.setMessage(message);
-    webhookService.dispatch('message.created', sessionId, messageCache.serializeMessage(message));
+    appendMessageLog(sessionId, message);
+    dispatchWebhook('message.created', sessionId, messageCache.serializeMessage(message));
   });
 
   client.on('message_reaction', (reaction) => {
-    webhookService.dispatch('message.reaction', sessionId, reaction);
+    dispatchWebhook('message.reaction', sessionId, reaction);
   });
 }
 
@@ -357,7 +373,8 @@ async function getAdvancedHealth({ includeSessionIds = env.exposeHealthSessionId
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     sessions: getHealthSummary(),
-    storedSessions
+    storedSessions,
+    persistence: await persistence.getHealth()
   };
 }
 

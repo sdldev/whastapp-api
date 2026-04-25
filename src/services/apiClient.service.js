@@ -10,7 +10,6 @@ const { appendJsonLine } = require('../utils/jsonlFile');
 const storeFile = env.apiClientStoreFile;
 const usageLogFile = env.apiUsageLogFile;
 const rateLimitBuckets = new Map();
-
 const SCOPE_BY_ROUTE = [
   { method: 'GET', pattern: /^\/sessions\/?$/, scope: 'sessions:read' },
   { method: 'POST', pattern: /^\/sessions\/restore\/?$/, scope: 'sessions:start' },
@@ -26,6 +25,7 @@ const SCOPE_BY_ROUTE = [
   { method: 'GET', pattern: /^\/metrics\/?$/, scope: 'metrics:read' },
   { method: 'GET', pattern: /^\/sessions\/[^/]+\/queue\/?$/, scope: 'queue:read' },
   { method: 'POST', pattern: /^\/sessions\/[^/]+\/queue\/(pause|resume)\/?$/, scope: 'queue:manage' },
+  { method: 'GET', pattern: /^\/sessions\/[^/]+\/messages\/logs\/?$/, scope: 'messages:read' },
   { method: 'POST', pattern: /^\/sessions\/[^/]+\/messages\/text\/?$/, scope: 'messages:send' },
   { method: 'POST', pattern: /^\/sessions\/[^/]+\/messages\/reply\/?$/, scope: 'messages:reply' },
   { method: 'POST', pattern: /^\/sessions\/[^/]+\/messages\/react\/?$/, scope: 'messages:react' },
@@ -615,6 +615,48 @@ async function appendUsageLog(entry) {
   }
 }
 
+function usageLogFromRow(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    clientId: row.client_id || null,
+    apiKeyId: row.api_key_id || null,
+    sessionId: row.session_id || null,
+    method: row.method || null,
+    path: row.path || null,
+    statusCode: row.status_code || null,
+    ipAddress: row.ip_address || null,
+    userAgent: row.user_agent || null,
+    scopeUsed: row.scope_used || null,
+    requestId: row.request_id || null,
+    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at
+  };
+}
+
+async function listUsageLogs(filters = {}) {
+  if (!persistence.isPostgresEnabled()) return { driver: env.persistenceDriver, items: [] };
+
+  const where = [];
+  const params = [];
+  const add = (sql, value) => {
+    params.push(value);
+    where.push(sql.replace('?', `$${params.length}`));
+  };
+
+  if (filters.clientId) add('client_id = ?', filters.clientId);
+  if (filters.sessionId) add('session_id = ?', filters.sessionId);
+  if (filters.statusCode) add('status_code = ?', Number(filters.statusCode));
+  if (filters.scopeUsed) add('scope_used = ?', filters.scopeUsed);
+  if (filters.fromDate) add('created_at >= ?', filters.fromDate);
+  if (filters.toDate) add('created_at <= ?', filters.toDate);
+
+  const limit = Math.min(Math.max(Number(filters.limit || 100), 1), 1000);
+  params.push(limit);
+  const sql = `SELECT * FROM api_usage_logs ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT $${params.length}`;
+  const result = await persistence.query(sql, params);
+  return { driver: env.persistenceDriver, items: result.rows.map(usageLogFromRow) };
+}
+
 module.exports = {
   createApiClient,
   listApiClients,
@@ -627,5 +669,6 @@ module.exports = {
   authorizeScope,
   authorizeSession,
   checkRateLimit,
-  appendUsageLog
+  appendUsageLog,
+  listUsageLogs
 };

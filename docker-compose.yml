@@ -1,0 +1,37 @@
+services:
+  whatsapp-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: whatsapp-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      PUPPETEER_HEADLESS: "true"
+      CHROME_EXECUTABLE_PATH: /usr/bin/chromium
+      WWEBJS_AUTH_PATH: /app/.wwebjs_auth
+      DATA_DIR: /app/data
+      UPLOAD_DIR: /app/uploads
+      PERSISTENCE_DRIVER: postgres
+      POSTGRES_HOST: 192.168.100.100
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: whatsappgateway
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: inipasswordnya
+      POSTGRES_SSL: "false"
+    volumes:
+      - ./.wwebjs_auth:/app/.wwebjs_auth
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+    shm_size: "1gb"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

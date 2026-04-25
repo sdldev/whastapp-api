@@ -15,7 +15,18 @@ const {
 } = require('../schemas/media.schema');
 
 const router = express.Router({ mergeParams: true });
-const upload = multer({ dest: env.uploadDir });
+const upload = multer({
+  dest: env.uploadDir,
+  limits: {
+    fileSize: env.uploadMaxBytes
+  },
+  fileFilter(req, file, callback) {
+    if (!env.uploadAllowedMimeTypes.length || env.uploadAllowedMimeTypes.includes(file.mimetype)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Unsupported upload file type'));
+  }
+});
 
 router.post('/base64', validate(mediaBase64Schema), asyncHandler(async (req, res) => {
   return success(res, await mediaService.sendBase64(req.params.sessionId, req.body), 201);

@@ -7,8 +7,12 @@ const env = require('../config/env');
 const logger = require('../utils/logger');
 const eventBus = require('./eventBus.service');
 const { AppError } = require('../utils/errors');
+const { assertSafeOutboundUrl } = require('../utils/outboundUrl');
+const { appendJsonLine, readJsonLines } = require('../utils/jsonlFile');
 
 const webhooks = new Map();
+const deliveryQueue = [];
+let activeDeliveries = 0;
 let loaded = false;
 
 function nowIso() {
@@ -17,29 +21,6 @@ function nowIso() {
 
 function ensureDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-}
-
-function readJsonLines(filePath) {
-  try {
-    if (!fs.existsSync(filePath)) return [];
-    return fs.readFileSync(filePath, 'utf8')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => JSON.parse(line));
-  } catch (error) {
-    logger.error({ err: error, file: filePath }, 'Failed to read JSONL file');
-    return [];
-  }
-}
-
-function appendJsonLine(filePath, entry) {
-  try {
-    ensureDir(filePath);
-    fs.appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
-  } catch (error) {
-    logger.error({ err: error, file: filePath }, 'Failed to append JSONL file');
-  }
 }
 
 function ensureLoaded() {
@@ -94,11 +75,12 @@ function assertWebhookAccess(actor, webhook) {
   }
 }
 
-function createWebhook({ url, events, secret, active = true }, actor = {}) {
+async function createWebhook({ url, events, secret, active = true }, actor = {}) {
   ensureLoaded();
+  const safeUrl = await assertSafeOutboundUrl(url, { requireHttps: env.nodeEnv === 'production' });
   const webhook = {
     id: uuidv4(),
-    url,
+    url: safeUrl,
     events,
     secret: secret || '',
     active,
@@ -126,13 +108,13 @@ function getWebhook(id, actor = {}) {
   return sanitize(webhook);
 }
 
-function updateWebhook(id, input, actor = {}) {
+async function updateWebhook(id, input, actor = {}) {
   ensureLoaded();
   const webhook = webhooks.get(id);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
 
-  if (input.url !== undefined) webhook.url = input.url;
+  if (input.url !== undefined) webhook.url = await assertSafeOutboundUrl(input.url, { requireHttps: env.nodeEnv === 'production' });
   if (input.events !== undefined) webhook.events = input.events;
   if (input.secret !== undefined) webhook.secret = input.secret || '';
   if (input.active !== undefined) webhook.active = input.active;
@@ -183,7 +165,7 @@ function listDeliveries(webhookId, actor = {}) {
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
   assertWebhookAccess(actor, webhook);
 
-  return readJsonLines(env.webhookDeliveryLogFile)
+  return readJsonLines(env.webhookDeliveryLogFile, { limit: 5000 })
     .filter((delivery) => delivery.webhookId === webhookId)
     .map(deliveryToPublic)
     .slice(-100)
@@ -239,6 +221,88 @@ async function deliver(webhook, payload, existingDelivery = null) {
   return delivery;
 }
 
+function updateWebhookFailureState(webhook, delivered) {
+  if (delivered) {
+    webhook.consecutiveFailures = 0;
+    webhook.lastFailureAt = null;
+    return;
+  }
+
+  webhook.consecutiveFailures = Number(webhook.consecutiveFailures || 0) + 1;
+  webhook.lastFailureAt = nowIso();
+  if (env.webhookMaxConsecutiveFailures > 0 && webhook.consecutiveFailures >= env.webhookMaxConsecutiveFailures) {
+    webhook.active = false;
+    webhook.updatedAt = nowIso();
+    logger.warn({ webhookId: webhook.id, failures: webhook.consecutiveFailures }, 'Webhook auto-disabled after consecutive failures');
+  }
+}
+
+function processDeliveryQueue() {
+  while (activeDeliveries < env.webhookDeliveryConcurrency && deliveryQueue.length > 0) {
+    const job = deliveryQueue.shift();
+    activeDeliveries += 1;
+    deliver(job.webhook, job.payload, job.existingDelivery)
+      .then((delivery) => {
+        updateWebhookFailureState(job.webhook, delivery.status === 'delivered');
+        persist();
+      })
+      .catch((error) => {
+        updateWebhookFailureState(job.webhook, false);
+        persist();
+        logger.error({ err: error, webhookId: job.webhook.id }, 'Unhandled webhook delivery queue error');
+      })
+      .finally(() => {
+        activeDeliveries -= 1;
+        processDeliveryQueue();
+      });
+  }
+}
+
+function enqueueDelivery(webhook, payload, existingDelivery = null) {
+  if (deliveryQueue.length >= env.webhookDeliveryMaxQueue) {
+    const delivery = existingDelivery || {
+      id: uuidv4(),
+      webhookId: webhook.id,
+      ownerClientId: webhook.ownerClientId || null,
+      event: payload.event,
+      sessionId: payload.sessionId,
+      payload,
+      status: 'dropped',
+      attempts: 0,
+      createdAt: nowIso(),
+      failedAt: nowIso(),
+      error: 'Webhook delivery queue is full'
+    };
+    appendDelivery(delivery);
+    logger.warn({ webhookId: webhook.id, event: payload.event }, 'Webhook delivery dropped because queue is full');
+    return delivery;
+  }
+
+  const delivery = existingDelivery || {
+    id: uuidv4(),
+    webhookId: webhook.id,
+    ownerClientId: webhook.ownerClientId || null,
+    event: payload.event,
+    sessionId: payload.sessionId,
+    payload,
+    status: 'queued',
+    attempts: 0,
+    createdAt: nowIso()
+  };
+  deliveryQueue.push({ webhook, payload, existingDelivery: delivery });
+  processDeliveryQueue();
+  return delivery;
+}
+
+function getDeliveryQueueState() {
+  return {
+    queued: deliveryQueue.length,
+    active: activeDeliveries,
+    concurrency: env.webhookDeliveryConcurrency,
+    maxQueue: env.webhookDeliveryMaxQueue
+  };
+}
+
 function dispatch(event, sessionId, data) {
   ensureLoaded();
   const payload = {
@@ -253,13 +317,13 @@ function dispatch(event, sessionId, data) {
   for (const webhook of webhooks.values()) {
     if (!webhook.active) continue;
     if (!webhook.events.includes(event) && !webhook.events.includes('*')) continue;
-    deliver(webhook, payload);
+    enqueueDelivery(webhook, payload);
   }
 }
 
-function retryDelivery(deliveryId, actor = {}) {
+async function retryDelivery(deliveryId, actor = {}) {
   ensureLoaded();
-  const delivery = readJsonLines(env.webhookDeliveryLogFile).find((item) => item.id === deliveryId);
+  const delivery = readJsonLines(env.webhookDeliveryLogFile, { limit: 10000 }).find((item) => item.id === deliveryId);
   if (!delivery) throw new AppError('Webhook delivery not found', 404, 'WEBHOOK_DELIVERY_NOT_FOUND');
   const webhook = webhooks.get(delivery.webhookId);
   if (!webhook) throw new AppError('Webhook not found', 404, 'WEBHOOK_NOT_FOUND');
@@ -292,5 +356,6 @@ module.exports = {
   deleteWebhook,
   listDeliveries,
   retryDelivery,
-  dispatch
+  dispatch,
+  getDeliveryQueueState
 };

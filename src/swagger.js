@@ -26,8 +26,8 @@ const swaggerSpec = swaggerJsdoc({
       { name: 'Groups', description: 'Group invite, metadata, settings, participants, dan mention everyone' },
       { name: 'Polls', description: 'Create poll dan vote poll' },
       { name: 'Channels', description: 'Channel read, send, admin, subscribers, dan settings dengan feature detection' },
-      { name: 'Metrics', description: 'Runtime metrics untuk sessions, queue, dan process' },
-      { name: 'Queue', description: 'In-memory send queue status dan control per session' },
+      { name: 'Metrics', description: 'Runtime metrics untuk sessions, bounded send queue, webhook delivery queue, message cache, log rotation, dan process' },
+      { name: 'Queue', description: 'In-memory bounded send queue status dan control per session' },
       { name: 'Admin', description: 'Generate dan kelola API client untuk integrasi frontend/client eksternal' },
       { name: 'Webhooks', description: 'Webhook registration dan event delivery configuration' },
       { name: 'Unsupported', description: 'Unsupported atau deprecated features' }
@@ -38,7 +38,7 @@ const swaggerSpec = swaggerJsdoc({
           type: 'apiKey',
           in: 'header',
           name: 'x-api-key',
-          description: 'API key client hasil generate dari endpoint admin. Legacy API_KEY env masih didukung sebagai fallback.'
+          description: 'API key client hasil generate dari endpoint admin. Legacy API_KEY env hanya aktif jika ENABLE_LEGACY_API_KEY=true; di production default nonaktif.'
         },
         AdminKeyAuth: {
           type: 'apiKey',
@@ -120,13 +120,69 @@ const swaggerSpec = swaggerJsdoc({
             ownerClientId: { type: 'string', nullable: true },
             event: { type: 'string', example: 'message.received' },
             sessionId: { type: 'string', example: 'default' },
-            status: { type: 'string', example: 'delivered' },
+            status: { type: 'string', example: 'delivered', enum: ['queued', 'delivered', 'failed', 'dropped'] },
             attempts: { type: 'integer', example: 1 },
             statusCode: { type: 'integer', nullable: true, example: 200 },
             error: { type: 'string', nullable: true },
             createdAt: { type: 'string', format: 'date-time' },
             deliveredAt: { type: 'string', format: 'date-time', nullable: true },
             failedAt: { type: 'string', format: 'date-time', nullable: true }
+          }
+        },
+        MetricsResponse: {
+          type: 'object',
+          properties: {
+            uptime: { type: 'number', example: 123.45 },
+            timestamp: { type: 'string', format: 'date-time' },
+            sessions: {
+              type: 'object',
+              properties: {
+                initializeTimeoutMs: { type: 'integer', example: 120000 },
+                restoreConcurrency: { type: 'integer', example: 2 }
+              },
+              additionalProperties: true
+            },
+            queue: {
+              type: 'object',
+              properties: {
+                delayMs: { type: 'integer', example: 5000 },
+                sessions: { type: 'integer', example: 1 },
+                activeChains: { type: 'integer', example: 1 },
+                totalPending: { type: 'integer', example: 0 },
+                maxPendingPerSession: { type: 'integer', example: 100 },
+                pausedSessions: { type: 'array', items: { type: 'string' } },
+                totalEnqueued: { type: 'integer', example: 20 },
+                totalCompleted: { type: 'integer', example: 19 },
+                totalFailed: { type: 'integer', example: 1 }
+              }
+            },
+            webhookDelivery: {
+              type: 'object',
+              properties: {
+                pending: { type: 'integer', example: 0 },
+                active: { type: 'integer', example: 0 },
+                concurrency: { type: 'integer', example: 5 },
+                maxQueue: { type: 'integer', example: 1000 },
+                dropped: { type: 'integer', example: 0 }
+              },
+              additionalProperties: true
+            },
+            messageCache: {
+              type: 'object',
+              properties: {
+                size: { type: 'integer', example: 42 },
+                maxEntries: { type: 'integer', example: 1000 },
+                ttlMs: { type: 'integer', example: 3600000 }
+              }
+            },
+            logs: {
+              type: 'object',
+              properties: {
+                jsonlMaxBytes: { type: 'integer', example: 10485760 },
+                jsonlMaxBackupFiles: { type: 'integer', example: 5 }
+              }
+            },
+            process: { type: 'object', additionalProperties: true }
           }
         },
         SendTextRequest: {
@@ -267,7 +323,8 @@ const swaggerSpec = swaggerJsdoc({
       '/health/ready': {
         get: {
           tags: ['Health'],
-          summary: 'Advanced readiness check with session and stored auth summary',
+          summary: 'Advanced readiness check with aggregate session and stored auth summary',
+          description: 'Public readiness endpoint. Stored session IDs are hidden unless EXPOSE_HEALTH_SESSION_IDS=true.',
           security: [],
           responses: { 200: { description: 'Readiness information' } }
         }
@@ -311,7 +368,10 @@ const swaggerSpec = swaggerJsdoc({
               }
             }
           },
-          responses: { 202: { description: 'Session sedang initializing' } }
+          responses: {
+            202: { description: 'Session sedang initializing' },
+            504: { description: 'Session initialize timeout', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         }
       },
       '/sessions/{sessionId}/status': {
@@ -526,15 +586,21 @@ const swaggerSpec = swaggerJsdoc({
         post: {
           tags: ['Media'],
           summary: 'Send media from URL',
+          description: 'URL divalidasi dengan outbound URL hardening. Private/loopback/link-local/metadata address diblokir kecuali ALLOW_PRIVATE_OUTBOUND_URLS=true.',
           parameters: [{ $ref: '#/components/parameters/SessionId' }],
           requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/MediaUrlRequest' } } } },
-          responses: { 201: { description: 'Media sent' } }
+          responses: {
+            201: { description: 'Media sent' },
+            400: { description: 'Outbound media URL blocked or invalid', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } },
+            429: { description: 'Send queue full', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         }
       },
       '/sessions/{sessionId}/media/upload': {
         post: {
           tags: ['Media'],
           summary: 'Send media from multipart upload',
+          description: 'Multipart upload dibatasi oleh UPLOAD_MAX_BYTES dan opsional UPLOAD_ALLOWED_MIME_TYPES; file sementara dibersihkan setelah send selesai/gagal.',
           parameters: [{ $ref: '#/components/parameters/SessionId' }],
           requestBody: {
             required: true,
@@ -552,14 +618,19 @@ const swaggerSpec = swaggerJsdoc({
               }
             }
           },
-          responses: { 201: { description: 'Uploaded media sent' } }
+          responses: {
+            201: { description: 'Uploaded media sent' },
+            413: { description: 'Upload exceeds configured size limit' },
+            415: { description: 'Upload MIME type not allowed' },
+            429: { description: 'Send queue full', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         }
       },
       '/sessions/{sessionId}/media/sticker/base64': {
         post: { tags: ['Media'], summary: 'Send sticker from base64 media', parameters: [{ $ref: '#/components/parameters/SessionId' }], requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/MediaBase64Request' } } } }, responses: { 201: { description: 'Sticker sent' } } }
       },
       '/sessions/{sessionId}/media/sticker/url': {
-        post: { tags: ['Media'], summary: 'Send sticker from media URL', parameters: [{ $ref: '#/components/parameters/SessionId' }], requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/MediaUrlRequest' } } } }, responses: { 201: { description: 'Sticker sent' } } }
+        post: { tags: ['Media'], summary: 'Send sticker from media URL', description: 'URL divalidasi dengan outbound URL hardening.', parameters: [{ $ref: '#/components/parameters/SessionId' }], requestBody: { required: true, content: { 'application/json': { schema: { $ref: '#/components/schemas/MediaUrlRequest' } } } }, responses: { 201: { description: 'Sticker sent' }, 400: { description: 'Outbound media URL blocked or invalid' }, 429: { description: 'Send queue full' } } }
       },
       '/sessions/{sessionId}/media/{messageId}/download': {
         get: {
@@ -898,9 +969,10 @@ const swaggerSpec = swaggerJsdoc({
         post: {
           tags: ['Channels'],
           summary: 'Send channel message from text/base64/url',
+          description: 'URL media divalidasi dengan outbound URL hardening. Private/loopback/link-local/metadata address diblokir kecuali ALLOW_PRIVATE_OUTBOUND_URLS=true.',
           parameters: [{ $ref: '#/components/parameters/SessionId' }, { $ref: '#/components/parameters/ChannelId' }],
           requestBody: { required: true, content: { 'application/json': { schema: { type: 'object', properties: { message: { type: 'string' }, mimetype: { type: 'string' }, data: { type: 'string' }, url: { type: 'string' }, filename: { type: 'string' }, caption: { type: 'string' }, options: { type: 'object' } } } } } },
-          responses: { 201: { description: 'Channel message sent' }, 400: { description: 'Feature not available' } }
+          responses: { 201: { description: 'Channel message sent' }, 400: { description: 'Feature not available or outbound URL blocked' }, 429: { description: 'Send queue full' } }
         },
         get: {
           tags: ['Channels'],
@@ -1029,7 +1101,7 @@ const swaggerSpec = swaggerJsdoc({
         get: {
           tags: ['Admin'],
           summary: 'List structured audit logs',
-          description: 'Membaca audit log JSONL dari AUDIT_LOG_FILE. Field sensitif sudah direduksi.',
+          description: 'Membaca audit log JSONL dari AUDIT_LOG_FILE. Field sensitif direduksi secara case-insensitive/pattern-based. File log dirotasi sesuai JSONL_LOG_MAX_BYTES dan JSONL_LOG_MAX_BACKUP_FILES.',
           security: [{ AdminKeyAuth: [] }],
           parameters: [
             { name: 'limit', in: 'query', required: false, schema: { type: 'integer', minimum: 1, maximum: 1000, example: 100 } },
@@ -1061,9 +1133,9 @@ const swaggerSpec = swaggerJsdoc({
         get: {
           tags: ['Metrics'],
           summary: 'Get runtime metrics',
-          description: 'Mengembalikan ringkasan uptime, sessions, in-memory send queue, dan process memory. Requires metrics:read scope.',
+          description: 'Mengembalikan ringkasan uptime, sessions, bounded send queue, webhook delivery queue, message cache, rotasi JSONL log, dan process memory. Requires metrics:read scope.',
           security: [{ ApiKeyAuth: [] }],
-          responses: { 200: { description: 'Runtime metrics' } }
+          responses: { 200: { description: 'Runtime metrics', content: { 'application/json': { schema: { $ref: '#/components/schemas/MetricsResponse' } } } } }
         }
       },
       '/sessions/{sessionId}/queue': {
@@ -1071,7 +1143,10 @@ const swaggerSpec = swaggerJsdoc({
           tags: ['Queue'],
           summary: 'Get session send queue state',
           parameters: [{ $ref: '#/components/parameters/SessionId' }],
-          responses: { 200: { description: 'Queue state for session' } }
+          responses: {
+            200: { description: 'Queue state for session' },
+            429: { description: 'Send queue full for session', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         }
       },
       '/sessions/{sessionId}/queue/pause': {
@@ -1110,7 +1185,10 @@ const swaggerSpec = swaggerJsdoc({
               }
             }
           },
-          responses: { 201: { description: 'Webhook registered', content: { 'application/json': { schema: { $ref: '#/components/schemas/Webhook' } } } } }
+          responses: {
+            201: { description: 'Webhook registered', content: { 'application/json': { schema: { $ref: '#/components/schemas/Webhook' } } } },
+            400: { description: 'Outbound webhook URL blocked or invalid', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         },
         get: {
           tags: ['Webhooks'],
@@ -1128,6 +1206,7 @@ const swaggerSpec = swaggerJsdoc({
         patch: {
           tags: ['Webhooks'],
           summary: 'Update webhook target, events, secret, or active flag',
+          description: 'Jika URL diubah, URL baru divalidasi dengan outbound URL hardening.',
           parameters: [{ name: 'webhookId', in: 'path', required: true, schema: { type: 'string' } }],
           requestBody: {
             required: true,
@@ -1145,7 +1224,10 @@ const swaggerSpec = swaggerJsdoc({
               }
             }
           },
-          responses: { 200: { description: 'Webhook updated' } }
+          responses: {
+            200: { description: 'Webhook updated' },
+            400: { description: 'Outbound webhook URL blocked or invalid', content: { 'application/json': { schema: { $ref: '#/components/schemas/ErrorResponse' } } } }
+          }
         },
         delete: {
           tags: ['Webhooks'],
@@ -1167,7 +1249,7 @@ const swaggerSpec = swaggerJsdoc({
           tags: ['Webhooks'],
           summary: 'Retry failed webhook delivery',
           parameters: [{ name: 'deliveryId', in: 'path', required: true, schema: { type: 'string' } }],
-          responses: { 202: { description: 'Webhook delivery retry queued/executed' } }
+          responses: { 202: { description: 'Webhook delivery retry queued' }, 429: { description: 'Webhook delivery queue full' } }
         }
       }
     }

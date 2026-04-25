@@ -18,8 +18,10 @@ Fitur utama:
 - Group management
 - Poll create dan vote
 - Webhook events dengan persistence file
-- Swagger/OpenAPI documentation
-- API key protection
+- Swagger/OpenAPI documentation, aktif default hanya di non-production
+- Generated API client dengan scopes, allowed sessions, rate limit, dan audit log
+- Outbound URL hardening untuk webhook/media URL
+- Bounded send queue, bounded webhook delivery queue, message cache TTL/LRU, dan JSONL log rotation
 - Delay pengiriman minimal 5 detik per session
 
 ## Requirements
@@ -62,19 +64,37 @@ Contoh `.env`:
 ```env
 NODE_ENV=development
 PORT=3000
-API_KEY=your-secret-key
+API_KEY=your-legacy-secret-key
 ADMIN_API_KEY=your-admin-secret
+ALLOW_ANONYMOUS_ACCESS=false
+ENABLE_LEGACY_API_KEY=true
+ENABLE_API_DOCS=true
+EXPOSE_HEALTH_SESSION_IDS=false
 API_KEY_PEPPER=your-key-hash-pepper
 DEFAULT_API_CLIENT_RATE_LIMIT_PER_MINUTE=60
 CORS_ORIGIN=*
 JSON_BODY_LIMIT=10mb
 MEDIA_BODY_LIMIT=50mb
+UPLOAD_MAX_BYTES=52428800
+UPLOAD_ALLOWED_MIME_TYPES=image/png,image/jpeg,image/webp,application/pdf
+OUTBOUND_URL_ALLOWED_HOSTS=
+ALLOW_PRIVATE_OUTBOUND_URLS=false
 WWEBJS_AUTH_PATH=.wwebjs_auth
 PUPPETEER_HEADLESS=true
 CHROME_EXECUTABLE_PATH=
 WEBHOOK_TIMEOUT_MS=10000
 WEBHOOK_RETRY_COUNT=3
+WEBHOOK_DELIVERY_CONCURRENCY=5
+WEBHOOK_DELIVERY_MAX_QUEUE=1000
+WEBHOOK_MAX_CONSECUTIVE_FAILURES=10
 SEND_MESSAGE_DELAY_MS=5000
+SEND_QUEUE_MAX_PENDING_PER_SESSION=100
+MESSAGE_CACHE_MAX_ENTRIES=1000
+MESSAGE_CACHE_TTL_MS=3600000
+SESSION_INITIALIZE_TIMEOUT_MS=120000
+SESSION_RESTORE_CONCURRENCY=2
+JSONL_LOG_MAX_BYTES=10485760
+JSONL_LOG_MAX_BACKUP_FILES=5
 UPLOAD_DIR=uploads
 DATA_DIR=data
 WEBHOOK_STORE_FILE=data/webhooks.json
@@ -87,10 +107,21 @@ AUDIT_LOG_FILE=data/audit.log
 Catatan:
 
 - `SEND_MESSAGE_DELAY_MS` dipaksa minimal `5000`, sehingga pengiriman pesan per session tidak bisa lebih cepat dari 5 detik.
-- `ADMIN_API_KEY` digunakan frontend/dashboard untuk generate, rotate, update, dan revoke API client.
+- `ALLOW_ANONYMOUS_ACCESS=false` harus dipertahankan di production; protected route menolak request tanpa `x-api-key`.
+- `ENABLE_LEGACY_API_KEY=false` disarankan di production agar legacy `API_KEY` tidak bypass scope/allowed session/rate limit.
+- `ENABLE_API_DOCS=false` membuat `/api-docs` dan `/api-docs.json` nonaktif di production secara default.
+- `EXPOSE_HEALTH_SESSION_IDS=false` mencegah `/health/ready` mengekspos daftar session ID.
+- `ADMIN_API_KEY` digunakan frontend/dashboard untuk generate, rotate, update, dan revoke API client; tidak fallback ke `API_KEY`.
 - Generated API key client memakai header `x-api-key`, dibatasi oleh scope, allowed session, dan rate limit per menit.
+- `OUTBOUND_URL_ALLOWED_HOSTS` dan `ALLOW_PRIVATE_OUTBOUND_URLS=false` mengontrol hardening SSRF untuk webhook/media URL.
+- `UPLOAD_MAX_BYTES` dan `UPLOAD_ALLOWED_MIME_TYPES` membatasi upload multipart.
+- `WEBHOOK_DELIVERY_CONCURRENCY`, `WEBHOOK_DELIVERY_MAX_QUEUE`, dan `WEBHOOK_MAX_CONSECUTIVE_FAILURES` membatasi webhook delivery target lambat/down.
+- `SEND_QUEUE_MAX_PENDING_PER_SESSION` menolak request dengan `SEND_QUEUE_FULL` saat pending send queue penuh.
+- `MESSAGE_CACHE_MAX_ENTRIES` dan `MESSAGE_CACHE_TTL_MS` membatasi runtime message cache.
+- `SESSION_INITIALIZE_TIMEOUT_MS` dan `SESSION_RESTORE_CONCURRENCY` mencegah start/restore session menggantung tanpa kontrol.
+- `JSONL_LOG_MAX_BYTES` dan `JSONL_LOG_MAX_BACKUP_FILES` mengontrol rotasi audit/usage/webhook delivery log.
 - Audit log terstruktur disimpan di `AUDIT_LOG_FILE` dan dapat dibaca oleh admin melalui `GET /admin/audit-logs`.
-- `API_KEY` masih bisa dipakai sebagai legacy global key, tetapi production disarankan memakai generated API client key.
+- `API_KEY` masih bisa dipakai sebagai legacy global key jika diaktifkan, tetapi production disarankan memakai generated API client key.
 - Folder `.wwebjs_auth` harus persistent agar tidak perlu scan QR ulang setelah restart.
 
 ## Endpoint Publik
@@ -99,13 +130,14 @@ Endpoint berikut tidak membutuhkan API key:
 
 ```txt
 GET /health
-GET /api-docs
-GET /api-docs.json
+GET /health/ready
 ```
+
+`/api-docs` dan `/api-docs.json` hanya aktif bila `ENABLE_API_DOCS=true`. Di production, docs default nonaktif.
 
 ## Swagger
 
-Swagger UI:
+Swagger UI tersedia bila `ENABLE_API_DOCS=true`:
 
 ```txt
 http://localhost:3000/api-docs
@@ -116,6 +148,8 @@ OpenAPI JSON:
 ```txt
 http://localhost:3000/api-docs.json
 ```
+
+Di production, `ENABLE_API_DOCS` default `false`.
 
 ## API Key
 
@@ -317,6 +351,8 @@ curl -X POST http://localhost:3000/webhooks \
 - Audit log terstruktur: `data/audit.log`
 - Upload temporary: `uploads`
 
+Log JSONL audit/usage/webhook delivery dirotasi berdasarkan `JSONL_LOG_MAX_BYTES` dan `JSONL_LOG_MAX_BACKUP_FILES`.
+
 ## Testing
 
 ```bash
@@ -325,11 +361,20 @@ npm test
 
 ## Production Checklist Singkat
 
-- Isi `API_KEY`
+- Isi `ADMIN_API_KEY` yang berbeda dari legacy/API client key
+- Set `ALLOW_ANONYMOUS_ACCESS=false`
+- Set `ENABLE_LEGACY_API_KEY=false` jika sudah memakai generated API client
+- Set `ENABLE_API_DOCS=false` atau batasi docs lewat network/admin environment
+- Set `EXPOSE_HEALTH_SESSION_IDS=false`
 - Batasi `CORS_ORIGIN`
+- Konfigurasi `OUTBOUND_URL_ALLOWED_HOSTS` untuk webhook/media target terpercaya bila memungkinkan
+- Pastikan `ALLOW_PRIVATE_OUTBOUND_URLS=false`
+- Batasi `UPLOAD_MAX_BYTES` dan `UPLOAD_ALLOWED_MIME_TYPES`
+- Sesuaikan `WEBHOOK_DELIVERY_CONCURRENCY`, `WEBHOOK_DELIVERY_MAX_QUEUE`, dan `SEND_QUEUE_MAX_PENDING_PER_SESSION`
+- Sesuaikan `MESSAGE_CACHE_MAX_ENTRIES`, `MESSAGE_CACHE_TTL_MS`, dan JSONL log rotation
 - Gunakan HTTPS/reverse proxy
 - Persist `.wwebjs_auth`
-- Persist `data/webhooks.json`
-- Monitor session status
+- Persist `data/webhooks.json` dan data store runtime
+- Monitor session status, queue, webhook delivery, message cache, dan disk log
 - Hindari broadcast agresif
 - Gunakan queue/persistence eksternal jika multi-instance

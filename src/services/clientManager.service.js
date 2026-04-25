@@ -66,6 +66,21 @@ function getClientState(session) {
   };
 }
 
+function timeoutError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage, timeoutCode) {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(timeoutError(timeoutMessage, timeoutCode)), timeoutMs);
+  });
+
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function findStoredSessionIds() {
   try {
     const entries = await fs.readdir(env.authPath, { withFileTypes: true });
@@ -174,12 +189,23 @@ async function startSession(sessionId, options = {}) {
   registerClientEvents(session);
 
   try {
-    await client.initialize();
+    await withTimeout(
+      client.initialize(),
+      env.sessionInitializeTimeoutMs,
+      `WhatsApp session initialization timed out after ${env.sessionInitializeTimeoutMs}ms`,
+      'SESSION_INITIALIZE_TIMEOUT'
+    );
   } catch (error) {
     session.status = 'error';
     session.lastError = error.message;
     logger.error({ err: error, sessionId }, 'Failed to initialize WhatsApp client');
-    throw new AppError(error.message, 500, 'SESSION_INITIALIZE_FAILED');
+    try {
+      if (client.destroy) await client.destroy();
+    } catch (destroyError) {
+      logger.warn({ err: destroyError, sessionId }, 'Failed to destroy timed out WhatsApp client');
+    }
+    const statusCode = error.code === 'SESSION_INITIALIZE_TIMEOUT' ? 504 : 500;
+    throw new AppError(error.message, statusCode, error.code || 'SESSION_INITIALIZE_FAILED');
   }
 
   return publicSession(session);
@@ -249,24 +275,34 @@ async function recoverSession(sessionId) {
 async function restoreSessions() {
   const storedSessionIds = await findStoredSessionIds();
   const results = [];
+  let cursor = 0;
 
-  for (const sessionId of storedSessionIds) {
-    if (sessions.has(sessionId)) {
-      results.push({ sessionId, restored: false, status: sessions.get(sessionId).status, reason: 'already_loaded' });
-      continue;
-    }
+  async function restoreNext() {
+    while (cursor < storedSessionIds.length) {
+      const sessionId = storedSessionIds[cursor];
+      cursor += 1;
 
-    try {
-      const session = await startSession(sessionId);
-      results.push({ sessionId, restored: true, status: session.status });
-    } catch (error) {
-      results.push({ sessionId, restored: false, status: 'error', error: error.message });
+      if (sessions.has(sessionId)) {
+        results.push({ sessionId, restored: false, status: sessions.get(sessionId).status, reason: 'already_loaded' });
+        continue;
+      }
+
+      try {
+        const session = await startSession(sessionId);
+        results.push({ sessionId, restored: true, status: session.status });
+      } catch (error) {
+        results.push({ sessionId, restored: false, status: 'error', error: error.message, code: error.code || null });
+      }
     }
   }
+
+  const workerCount = Math.min(env.sessionRestoreConcurrency, storedSessionIds.length || 1);
+  await Promise.all(Array.from({ length: workerCount }, restoreNext));
 
   return {
     total: storedSessionIds.length,
     restored: results.filter((item) => item.restored).length,
+    concurrency: env.sessionRestoreConcurrency,
     results
   };
 }
@@ -309,17 +345,19 @@ function getHealthSummary() {
   return summary;
 }
 
-async function getAdvancedHealth() {
+async function getAdvancedHealth({ includeSessionIds = env.exposeHealthSessionIds } = {}) {
   const storedSessionIds = await findStoredSessionIds();
+  const storedSessions = {
+    total: storedSessionIds.length
+  };
+  if (includeSessionIds) storedSessions.sessionIds = storedSessionIds;
+
   return {
     api: 'ok',
     uptime: process.uptime(),
     memory: process.memoryUsage(),
     sessions: getHealthSummary(),
-    storedSessions: {
-      total: storedSessionIds.length,
-      sessionIds: storedSessionIds
-    }
+    storedSessions
   };
 }
 
@@ -339,5 +377,6 @@ module.exports = {
   getScreenshot,
   destroyAll,
   getHealthSummary,
-  getAdvancedHealth
+  getAdvancedHealth,
+  withTimeout
 };

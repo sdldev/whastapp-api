@@ -26,7 +26,7 @@ Development default:
 http://localhost:3000
 ```
 
-Swagger:
+Swagger/OpenAPI tersedia di non-production secara default:
 
 ```txt
 http://localhost:3000/api-docs
@@ -37,6 +37,8 @@ OpenAPI JSON:
 ```txt
 http://localhost:3000/api-docs.json
 ```
+
+Di production, docs default nonaktif kecuali backend diset `ENABLE_API_DOCS=true`.
 
 ## 3. Admin Headers
 
@@ -299,7 +301,7 @@ Jika limit habis:
 
 HTTP status: `429`.
 
-Catatan: rate limit HTTP berbeda dengan delay pengiriman WhatsApp. Pengiriman message/media tetap memiliki gate minimal 5 detik per session.
+Catatan: rate limit HTTP berbeda dengan delay pengiriman WhatsApp. Pengiriman message/media tetap memiliki gate minimal 5 detik per session dan send queue bounded. Jika pending queue per session penuh, backend mengembalikan `SEND_QUEUE_FULL` dengan HTTP 429.
 
 ## 12. Scope List
 
@@ -394,7 +396,7 @@ Untuk MVP frontend, buat preset:
 ["sessions:read", "events:read", "metrics:read", "queue:read", "queue:manage"]
 ```
 
-Gunakan preset ini untuk dashboard internal yang perlu melihat metrics runtime dan pause/resume queue per session.
+Gunakan preset ini untuk dashboard internal yang perlu melihat metrics runtime, webhook delivery queue, message cache, rotasi log, serta pause/resume queue per session.
 
 ### Group Admin
 
@@ -485,6 +487,9 @@ Jika client mencoba session lain:
 | `INSUFFICIENT_SCOPE` | 403 | Scope kurang | Tampilkan required scope dari details |
 | `SESSION_ACCESS_DENIED` | 403 | Session tidak diizinkan | Update allowedSessions |
 | `RATE_LIMIT_EXCEEDED` | 429 | Request terlalu banyak | Tampilkan waktu reset |
+| `SEND_QUEUE_FULL` | 429 | Pending send queue session penuh | Tampilkan retry/backoff atau minta user tunggu |
+| `OUTBOUND_URL_BLOCKED` | 400 | URL webhook/media ditolak hardening SSRF | Minta user memakai HTTPS/domain allowlist publik |
+| `SESSION_INITIALIZE_TIMEOUT` | 504 | Start/restore session timeout | Tampilkan retry dan cek Chromium/server resource |
 | `VALIDATION_ERROR` | 400 | Payload invalid | Tampilkan validasi field |
 
 ## 15. Storage dan Audit
@@ -507,6 +512,8 @@ Audit log terstruktur disimpan JSON Lines di:
 data/audit.log
 ```
 
+File JSON Lines audit/usage/webhook delivery dirotasi sesuai `JSONL_LOG_MAX_BYTES` dan `JSONL_LOG_MAX_BACKUP_FILES`.
+
 Audit log dapat dibaca oleh admin melalui:
 
 ```txt
@@ -527,5 +534,7 @@ File ini untuk backend/ops, bukan untuk frontend langsung.
 - Buat action revoke dengan confirmation modal.
 - Buat preset scopes agar admin tidak harus memilih manual semua scope.
 - Tampilkan rate limit dan last used.
+- Tampilkan metrics operasional bila frontend memiliki preset Operations Dashboard.
+- Tampilkan error queue penuh, URL outbound ditolak, dan session initialize timeout dengan pesan action-oriented.
 - Buat halaman admin-only untuk membaca audit log jika diperlukan.
 - Tangani error code penting dari backend.

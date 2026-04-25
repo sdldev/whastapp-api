@@ -5,6 +5,7 @@ const sendQueue = require('./sendQueue.service');
 const messageCache = require('../store/messageCache.store');
 const { normalizeChatId } = require('../utils/normalizeWhatsappId');
 const { AppError } = require('../utils/errors');
+const { assertSafeOutboundUrl } = require('../utils/outboundUrl');
 
 async function sendBase64(sessionId, { to, mimetype, data, filename, caption }) {
   const client = clientManager.ensureReady(sessionId);
@@ -16,7 +17,8 @@ async function sendBase64(sessionId, { to, mimetype, data, filename, caption }) 
 
 async function sendUrl(sessionId, { to, url, caption }) {
   const client = clientManager.ensureReady(sessionId);
-  const media = await MessageMedia.fromUrl(url);
+  const safeUrl = await assertSafeOutboundUrl(url);
+  const media = await MessageMedia.fromUrl(safeUrl);
   const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(normalizeChatId(to), media, caption ? { caption } : {}));
   messageCache.setMessage(sent);
   return messageCache.serializeMessage(sent);
@@ -24,12 +26,15 @@ async function sendUrl(sessionId, { to, url, caption }) {
 
 async function sendUpload(sessionId, { to, caption, file }) {
   if (!file) throw new AppError('File is required', 400, 'FILE_REQUIRED');
-  const client = clientManager.ensureReady(sessionId);
-  const media = MessageMedia.fromFilePath(file.path);
-  const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(normalizeChatId(to), media, caption ? { caption } : {}));
-  await fs.unlink(file.path).catch(() => {});
-  messageCache.setMessage(sent);
-  return messageCache.serializeMessage(sent);
+  try {
+    const client = clientManager.ensureReady(sessionId);
+    const media = MessageMedia.fromFilePath(file.path);
+    const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(normalizeChatId(to), media, caption ? { caption } : {}));
+    messageCache.setMessage(sent);
+    return messageCache.serializeMessage(sent);
+  } finally {
+    await fs.unlink(file.path).catch(() => {});
+  }
 }
 
 async function sendStickerBase64(sessionId, { to, mimetype, data, filename }) {
@@ -42,7 +47,8 @@ async function sendStickerBase64(sessionId, { to, mimetype, data, filename }) {
 
 async function sendStickerUrl(sessionId, { to, url }) {
   const client = clientManager.ensureReady(sessionId);
-  const media = await MessageMedia.fromUrl(url);
+  const safeUrl = await assertSafeOutboundUrl(url);
+  const media = await MessageMedia.fromUrl(safeUrl);
   const sent = await sendQueue.runWithDelay(sessionId, () => client.sendMessage(normalizeChatId(to), media, { sendMediaAsSticker: true }));
   messageCache.setMessage(sent);
   return messageCache.serializeMessage(sent);

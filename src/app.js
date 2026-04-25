@@ -40,11 +40,13 @@ app.use(express.json({ limit: env.jsonBodyLimit }));
 app.use(express.urlencoded({ extended: true, limit: env.jsonBodyLimit }));
 app.use(morgan(env.nodeEnv === 'development' ? 'dev' : 'combined'));
 
-app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  explorer: true,
-  customSiteTitle: 'WhatsApp API Documentation'
-}));
+if (env.enableApiDocs) {
+  app.get('/api-docs.json', (req, res) => res.json(swaggerSpec));
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+    explorer: true,
+    customSiteTitle: 'WhatsApp API Documentation'
+  }));
+}
 
 app.use('/health', healthRoutes);
 app.use('/admin', adminKeyMiddleware, adminRoutes);

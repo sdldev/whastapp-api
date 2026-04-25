@@ -5,6 +5,7 @@ const { randomUUID } = require('crypto');
 const env = require('../config/env');
 const { AppError } = require('../utils/errors');
 const persistence = require('./persistence.service');
+const { appendJsonLine } = require('../utils/jsonlFile');
 
 const storeFile = env.apiClientStoreFile;
 const usageLogFile = env.apiUsageLogFile;
@@ -608,7 +609,7 @@ async function appendUsageLog(entry) {
       return;
     }
     ensureStoreDir(usageLogFile);
-    fs.appendFileSync(usageLogFile, `${JSON.stringify(payload)}\n`);
+    appendJsonLine(usageLogFile, payload);
   } catch (error) {
     // Audit logging must not break API request flow.
   }

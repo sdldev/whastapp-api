@@ -4,6 +4,7 @@ const sendQueue = require('./sendQueue.service');
 const messageCache = require('../store/messageCache.store');
 const { normalizeChatId, normalizeGroupId, normalizeContactId } = require('../utils/normalizeWhatsappId');
 const { AppError } = require('../utils/errors');
+const { assertSafeOutboundUrl } = require('../utils/outboundUrl');
 
 function ensureFeature(target, methodName, label = methodName) {
   if (!target || typeof target[methodName] !== 'function') {
@@ -345,7 +346,8 @@ async function sendChannelMessage(sessionId, channelId, payload) {
   if (payload.caption) options.caption = payload.caption;
 
   if (payload.url) {
-    content = await MessageMedia.fromUrl(payload.url, { unsafeMime: true });
+    const safeUrl = await assertSafeOutboundUrl(payload.url);
+    content = await MessageMedia.fromUrl(safeUrl);
   } else if (payload.data) {
     content = new MessageMedia(payload.mimetype, payload.data, payload.filename);
   }

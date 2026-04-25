@@ -79,19 +79,37 @@ Buat file `.env` jika diperlukan.
 ```env
 NODE_ENV=development
 PORT=3000
-API_KEY=your-secret-key
+API_KEY=your-legacy-secret-key
 ADMIN_API_KEY=your-admin-secret
+ALLOW_ANONYMOUS_ACCESS=false
+ENABLE_LEGACY_API_KEY=true
+ENABLE_API_DOCS=true
+EXPOSE_HEALTH_SESSION_IDS=false
 API_KEY_PEPPER=your-key-hash-pepper
 DEFAULT_API_CLIENT_RATE_LIMIT_PER_MINUTE=60
 CORS_ORIGIN=*
 JSON_BODY_LIMIT=10mb
 MEDIA_BODY_LIMIT=50mb
+UPLOAD_MAX_BYTES=52428800
+UPLOAD_ALLOWED_MIME_TYPES=image/png,image/jpeg,image/webp,application/pdf
+OUTBOUND_URL_ALLOWED_HOSTS=
+ALLOW_PRIVATE_OUTBOUND_URLS=false
 WWEBJS_AUTH_PATH=.wwebjs_auth
 PUPPETEER_HEADLESS=true
 CHROME_EXECUTABLE_PATH=
 WEBHOOK_TIMEOUT_MS=10000
 WEBHOOK_RETRY_COUNT=3
+WEBHOOK_DELIVERY_CONCURRENCY=5
+WEBHOOK_DELIVERY_MAX_QUEUE=1000
+WEBHOOK_MAX_CONSECUTIVE_FAILURES=10
 SEND_MESSAGE_DELAY_MS=5000
+SEND_QUEUE_MAX_PENDING_PER_SESSION=100
+MESSAGE_CACHE_MAX_ENTRIES=1000
+MESSAGE_CACHE_TTL_MS=3600000
+SESSION_INITIALIZE_TIMEOUT_MS=120000
+SESSION_RESTORE_CONCURRENCY=2
+JSONL_LOG_MAX_BYTES=10485760
+JSONL_LOG_MAX_BACKUP_FILES=5
 UPLOAD_DIR=uploads
 DATA_DIR=data
 WEBHOOK_STORE_FILE=data/webhooks.json
@@ -106,18 +124,37 @@ AUDIT_LOG_FILE=data/audit.log
 | Variable | Default | Keterangan |
 |---|---:|---|
 | `PORT` | `3000` | Port HTTP server |
-| `API_KEY` | kosong | Legacy API key global. Masih didukung sebagai fallback, tetapi production disarankan memakai generated API client key |
-| `ADMIN_API_KEY` | nilai `API_KEY` | Admin key untuk endpoint `/admin/*` seperti generate, rotate, revoke API client |
+| `API_KEY` | kosong | Legacy API key global. Di production legacy key default nonaktif kecuali `ENABLE_LEGACY_API_KEY=true`; gunakan generated API client key untuk kontrol scope/session/rate limit |
+| `ADMIN_API_KEY` | kosong | Admin key khusus untuk endpoint `/admin/*`; tidak fallback ke `API_KEY` |
+| `ALLOW_ANONYMOUS_ACCESS` | `false` | Jika `true`, protected route boleh anonymous saat tidak ada API key. Jangan aktifkan di production |
+| `ENABLE_LEGACY_API_KEY` | `true` non-production, `false` production | Mengaktifkan legacy `API_KEY` global |
+| `ENABLE_API_DOCS` | `true` non-production, `false` production | Mengaktifkan `/api-docs` dan `/api-docs.json` |
+| `EXPOSE_HEALTH_SESSION_IDS` | `false` | Jika `true`, `/health/ready` menampilkan daftar stored session ID |
 | `API_KEY_PEPPER` | nilai `API_KEY` atau development pepper | Secret pepper untuk hash API key client di storage |
 | `DEFAULT_API_CLIENT_RATE_LIMIT_PER_MINUTE` | `60` | Default rate limit HTTP per generated API client |
 | `CORS_ORIGIN` | `*` | Origin yang diizinkan, bisa comma-separated |
 | `JSON_BODY_LIMIT` | `10mb` | Limit body JSON |
 | `MEDIA_BODY_LIMIT` | `50mb` | Limit media body |
+| `UPLOAD_MAX_BYTES` | `52428800` | Limit file multipart upload |
+| `UPLOAD_ALLOWED_MIME_TYPES` | kosong | Comma-separated MIME allowlist upload. Jika kosong, semua MIME diterima dengan size limit tetap aktif |
+| `OUTBOUND_URL_ALLOWED_HOSTS` | kosong | Allowlist host outbound untuk webhook/media URL; mendukung wildcard seperti `*.example.com` |
+| `ALLOW_PRIVATE_OUTBOUND_URLS` | `false` | Jika `false`, URL outbound private/loopback/link-local/metadata diblokir |
 | `WWEBJS_AUTH_PATH` | `.wwebjs_auth` | Lokasi penyimpanan LocalAuth session |
 | `PUPPETEER_HEADLESS` | `true` | Mode headless Puppeteer |
 | `CHROME_EXECUTABLE_PATH` | kosong | Path Google Chrome opsional |
 | `WEBHOOK_TIMEOUT_MS` | `10000` | Timeout webhook delivery |
 | `WEBHOOK_RETRY_COUNT` | `3` | Jumlah retry webhook delivery |
+| `WEBHOOK_DELIVERY_CONCURRENCY` | `5` | Batas delivery webhook paralel per process |
+| `WEBHOOK_DELIVERY_MAX_QUEUE` | `1000` | Batas antrean webhook delivery in-memory |
+| `WEBHOOK_MAX_CONSECUTIVE_FAILURES` | `10` | Auto-disable webhook setelah gagal beruntun; `0` untuk nonaktif |
+| `SEND_MESSAGE_DELAY_MS` | `5000` | Delay minimal pengiriman per session; dipaksa minimal 5000ms |
+| `SEND_QUEUE_MAX_PENDING_PER_SESSION` | `100` | Batas pending send queue per session sebelum `SEND_QUEUE_FULL` |
+| `MESSAGE_CACHE_MAX_ENTRIES` | `1000` | Batas entry runtime message cache |
+| `MESSAGE_CACHE_TTL_MS` | `3600000` | TTL runtime message cache |
+| `SESSION_INITIALIZE_TIMEOUT_MS` | `120000` | Timeout `client.initialize()` saat start/restore session |
+| `SESSION_RESTORE_CONCURRENCY` | `2` | Batas restore session paralel |
+| `JSONL_LOG_MAX_BYTES` | `10485760` | Batas ukuran file JSONL sebelum rotasi |
+| `JSONL_LOG_MAX_BACKUP_FILES` | `5` | Jumlah backup rotasi JSONL |
 | `UPLOAD_DIR` | `uploads` | Folder temporary upload |
 | `DATA_DIR` | `data` | Folder data runtime |
 | `WEBHOOK_STORE_FILE` | `data/webhooks.json` | File persistence webhook |
@@ -202,7 +239,7 @@ Audit log disimpan sebagai JSON Lines di `AUDIT_LOG_FILE`. Field sensitif sepert
 
 ## Swagger Documentation
 
-Swagger UI tersedia di:
+Swagger UI tersedia di non-production secara default:
 
 ```txt
 http://localhost:3000/api-docs
@@ -214,7 +251,9 @@ Raw OpenAPI JSON tersedia di:
 http://localhost:3000/api-docs.json
 ```
 
-Dokumentasi Swagger mencakup endpoint session, messages, media, mentions, contacts, location, chats, groups, polls, webhooks, dan fitur unsupported/deprecated.
+Di production, docs default nonaktif. Aktifkan eksplisit dengan `ENABLE_API_DOCS=true` atau lindungi lewat reverse proxy/admin network.
+
+Dokumentasi Swagger mencakup endpoint session, messages, media, mentions, contacts, location, chats, groups, polls, webhooks, metrics, queue, dan fitur unsupported/deprecated.
 
 ## Response Format
 
@@ -458,7 +497,7 @@ POST /sessions/:sessionId/queue/pause
 POST /sessions/:sessionId/queue/resume
 ```
 
-`/metrics` mengembalikan ringkasan runtime seperti uptime, status session, statistik queue, dan memory process. Endpoint queue dipakai untuk melihat atau mengontrol in-memory send queue per session.
+`/metrics` mengembalikan ringkasan runtime seperti uptime, status session, statistik send queue, webhook delivery queue, message cache, konfigurasi rotasi log, dan memory process. Endpoint queue dipakai untuk melihat atau mengontrol in-memory send queue per session.
 
 ### Webhooks
 
@@ -519,6 +558,8 @@ curl -X POST http://localhost:3000/webhooks \
     "secret": "webhook-secret"
   }'
 ```
+
+Webhook create/update memvalidasi URL outbound untuk mengurangi SSRF: private/loopback/link-local/metadata address diblokir, DNS resolved IP ikut dicek, dan production mewajibkan HTTPS kecuali konfigurasi override internal diaktifkan.
 
 Webhook disimpan di file:
 
@@ -648,6 +689,21 @@ Webhook tersimpan di:
 data/webhooks.json
 ```
 
+Delivery log tersimpan sebagai JSON Lines dan dirotasi berdasarkan `JSONL_LOG_MAX_BYTES`/`JSONL_LOG_MAX_BACKUP_FILES`:
+
+```txt
+data/webhook-deliveries.log
+```
+
+### Audit dan Usage Logs
+
+Audit log dan usage log tersimpan sebagai JSON Lines dengan rotasi ukuran yang sama:
+
+```txt
+data/audit.log
+data/api-usage.log
+```
+
 ## Testing
 
 Jalankan:
@@ -666,13 +722,18 @@ npm run check
 
 Rekomendasi sebelum production:
 
-- Isi `API_KEY`
+- Isi `ADMIN_API_KEY` dengan secret berbeda dari legacy `API_KEY`
+- Gunakan generated API client key; set `ENABLE_LEGACY_API_KEY=false`
+- Pastikan `ALLOW_ANONYMOUS_ACCESS=false`
+- Biarkan `ENABLE_API_DOCS=false` kecuali docs dilindungi reverse proxy/admin network
+- Biarkan `ALLOW_PRIVATE_OUTBOUND_URLS=false`; gunakan `OUTBOUND_URL_ALLOWED_HOSTS` bila webhook/media URL perlu allowlist
+- Set `UPLOAD_ALLOWED_MIME_TYPES` sesuai file yang benar-benar diperlukan
 - Gunakan HTTPS/reverse proxy
-- Persist folder `.wwebjs_auth`
+- Persist folder `.wwebjs_auth` dan `data`
 - Batasi `CORS_ORIGIN`
-- Tambahkan rate limit dan queue untuk pengiriman pesan massal
+- Pantau send queue, webhook delivery queue, message cache, dan rotasi log lewat `/metrics`
 - Hindari broadcast agresif
-- Gunakan database untuk message metadata, API usage log, dan audit log jika diperlukan
+- Gunakan database/durable queue untuk high traffic atau multi-instance
 - Deploy dengan Docker Compose bisa memakai `Dockerfile`, `docker-compose.yml`, `.dockerignore`, dan `.env.example` yang tersedia di root project
 - Pertimbangkan `RemoteAuth` jika filesystem server tidak persistent
 - Jalankan dengan process manager seperti PM2, systemd, atau Docker

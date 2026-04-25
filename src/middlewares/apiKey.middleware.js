@@ -35,21 +35,27 @@ function auditAfterResponse(req, res) {
   });
 }
 
-function apiKeyMiddleware(req, res, next) {
+async function apiKeyMiddleware(req, res, next) {
   const providedKey = req.get('x-api-key');
 
-  if (!providedKey && !env.apiKey) {
-    req.authMode = 'anonymous';
-    return auditMiddleware(req, res, next);
+  if (!providedKey) {
+    if (env.allowAnonymousAccess) {
+      req.authMode = 'anonymous';
+      return auditMiddleware(req, res, next);
+    }
+    return next(new AppError('Invalid or missing API key', 401, 'INVALID_API_KEY'));
   }
 
   if (env.apiKey && providedKey === env.apiKey) {
+    if (!env.enableLegacyApiKey) {
+      return next(new AppError('Legacy API key authentication is disabled', 401, 'LEGACY_API_KEY_DISABLED'));
+    }
     req.authMode = 'legacy';
     return auditMiddleware(req, res, next);
   }
 
   try {
-    const auth = apiClientService.authenticateApiKey(providedKey);
+    const auth = await apiClientService.authenticateApiKey(providedKey);
     const requiredScope = apiClientService.getRequiredScope(req.method, req.path);
     const sessionId = extractSessionId(req);
 

@@ -56,17 +56,35 @@ NODE_ENV=production
 PORT=3000
 API_KEY=replace-with-legacy-fallback-secret
 ADMIN_API_KEY=replace-with-admin-dashboard-secret
+ALLOW_ANONYMOUS_ACCESS=false
+ENABLE_LEGACY_API_KEY=false
+ENABLE_API_DOCS=false
+EXPOSE_HEALTH_SESSION_IDS=false
 API_KEY_PEPPER=replace-with-api-key-hash-pepper
 DEFAULT_API_CLIENT_RATE_LIMIT_PER_MINUTE=60
 CORS_ORIGIN=https://dashboard.example.com
 JSON_BODY_LIMIT=10mb
 MEDIA_BODY_LIMIT=50mb
+UPLOAD_MAX_BYTES=52428800
+UPLOAD_ALLOWED_MIME_TYPES=image/png,image/jpeg,image/webp,application/pdf
+OUTBOUND_URL_ALLOWED_HOSTS=hooks.example.com,*.trusted-webhook.com
+ALLOW_PRIVATE_OUTBOUND_URLS=false
 WWEBJS_AUTH_PATH=.wwebjs_auth
 PUPPETEER_HEADLESS=true
 CHROME_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 WEBHOOK_TIMEOUT_MS=10000
 WEBHOOK_RETRY_COUNT=3
+WEBHOOK_DELIVERY_CONCURRENCY=5
+WEBHOOK_DELIVERY_MAX_QUEUE=1000
+WEBHOOK_MAX_CONSECUTIVE_FAILURES=10
 SEND_MESSAGE_DELAY_MS=5000
+SEND_QUEUE_MAX_PENDING_PER_SESSION=100
+MESSAGE_CACHE_MAX_ENTRIES=1000
+MESSAGE_CACHE_TTL_MS=3600000
+SESSION_INITIALIZE_TIMEOUT_MS=120000
+SESSION_RESTORE_CONCURRENCY=2
+JSONL_LOG_MAX_BYTES=10485760
+JSONL_LOG_MAX_BACKUP_FILES=5
 UPLOAD_DIR=uploads
 DATA_DIR=data
 WEBHOOK_STORE_FILE=data/webhooks.json
@@ -79,9 +97,20 @@ AUDIT_LOG_FILE=data/audit.log
 Catatan:
 
 - `SEND_MESSAGE_DELAY_MS` selalu minimal 5000ms.
-- `ADMIN_API_KEY` wajib diisi untuk dashboard/admin endpoint `/admin/*`.
+- `ADMIN_API_KEY` wajib diisi untuk dashboard/admin endpoint `/admin/*` dan tidak fallback ke `API_KEY`.
+- `ALLOW_ANONYMOUS_ACCESS=false` harus dipertahankan di production.
+- `ENABLE_LEGACY_API_KEY=false` disarankan agar legacy global key tidak bypass scope/allowed session/rate limit.
+- `ENABLE_API_DOCS=false` membuat `/api-docs` dan `/api-docs.json` nonaktif di production secara default.
+- `EXPOSE_HEALTH_SESSION_IDS=false` mencegah `/health/ready` mengekspos daftar session ID.
 - `API_KEY_PEPPER` wajib stabil dan rahasia karena dipakai untuk hash generated API key.
 - `API_KEY` hanya fallback legacy; gunakan generated API client key untuk integrasi client.
+- `OUTBOUND_URL_ALLOWED_HOSTS` dapat digunakan untuk membatasi target webhook/media URL; `ALLOW_PRIVATE_OUTBOUND_URLS=false` memblokir private/loopback/link-local/metadata address.
+- `UPLOAD_MAX_BYTES` dan `UPLOAD_ALLOWED_MIME_TYPES` membatasi upload multipart.
+- `WEBHOOK_DELIVERY_CONCURRENCY` dan `WEBHOOK_DELIVERY_MAX_QUEUE` memberi backpressure untuk webhook target lambat/down.
+- `SEND_QUEUE_MAX_PENDING_PER_SESSION` menolak request dengan `SEND_QUEUE_FULL` saat pending send queue penuh.
+- `MESSAGE_CACHE_MAX_ENTRIES` dan `MESSAGE_CACHE_TTL_MS` membatasi runtime message cache.
+- `SESSION_INITIALIZE_TIMEOUT_MS` dan `SESSION_RESTORE_CONCURRENCY` mencegah start/restore session menggantung tanpa kontrol.
+- `JSONL_LOG_MAX_BYTES` dan `JSONL_LOG_MAX_BACKUP_FILES` mengontrol rotasi audit/usage/webhook delivery log.
 - `CORS_ORIGIN` sebaiknya tidak memakai `*` di production.
 - `WWEBJS_AUTH_PATH` harus berada pada disk persistent.
 
@@ -112,6 +141,8 @@ curl http://localhost:3000/health
 ```
 
 ### 5.5 Verifikasi Swagger
+
+Swagger hanya tersedia bila `ENABLE_API_DOCS=true`. Untuk production, default-nya nonaktif; verifikasi docs hanya dari network/admin environment yang aman.
 
 ```txt
 http://localhost:3000/api-docs
@@ -184,25 +215,28 @@ Urutan shutdown yang diharapkan:
 
 ### 8.1 API Key
 
-Production wajib mengisi:
+Production sebaiknya memakai generated API client key untuk integrasi dan admin key terpisah untuk dashboard:
 
 ```env
-API_KEY=replace-with-long-random-secret
+ADMIN_API_KEY=replace-with-admin-dashboard-secret
+ENABLE_LEGACY_API_KEY=false
+ALLOW_ANONYMOUS_ACCESS=false
 ```
 
 Semua endpoint protected wajib memakai:
 
 ```txt
-x-api-key: replace-with-long-random-secret
+x-api-key: wa_sk_live_cli_xxx_secret
 ```
 
-Endpoint tanpa API key:
+Endpoint publik default:
 
 ```txt
 GET /health
-GET /api-docs
-GET /api-docs.json
+GET /health/ready
 ```
+
+`/api-docs` dan `/api-docs.json` hanya publik bila `ENABLE_API_DOCS=true`. `/health/ready` tidak menampilkan daftar session ID kecuali `EXPOSE_HEALTH_SESSION_IDS=true`.
 
 ### 8.2 CORS
 
@@ -275,7 +309,8 @@ support  -> delay sendiri
 
 Catatan:
 
-- Queue saat ini in-memory.
+- Queue saat ini in-memory dan bounded per session.
+- Jika pending per session melewati `SEND_QUEUE_MAX_PENDING_PER_SESSION`, request ditolak dengan `SEND_QUEUE_FULL`/HTTP 429.
 - Jika process restart, queue hilang.
 - Jika multi-instance, gunakan Redis/BullMQ agar delay konsisten lintas instance.
 
@@ -293,6 +328,8 @@ curl -X POST http://localhost:3000/webhooks \
     "secret": "webhook-secret"
   }'
 ```
+
+Webhook create/update melewati outbound URL hardening: hanya HTTP/HTTPS, private/loopback/link-local/metadata address diblokir, DNS resolved IP ikut divalidasi, dan production mewajibkan HTTPS. Gunakan `OUTBOUND_URL_ALLOWED_HOSTS` untuk allowlist domain target webhook.
 
 ### 10.2 Webhook Store
 
@@ -326,9 +363,12 @@ Konfigurasi:
 ```env
 WEBHOOK_TIMEOUT_MS=10000
 WEBHOOK_RETRY_COUNT=3
+WEBHOOK_DELIVERY_CONCURRENCY=5
+WEBHOOK_DELIVERY_MAX_QUEUE=1000
+WEBHOOK_MAX_CONSECUTIVE_FAILURES=10
 ```
 
-Jika target webhook gagal, service akan retry sesuai konfigurasi dan menulis delivery log.
+Jika target webhook gagal, service akan retry sesuai konfigurasi dan menulis delivery log. Delivery berjalan lewat queue in-memory dengan concurrency limit. Jika queue penuh, delivery ditandai `dropped`. Jika gagal beruntun melewati `WEBHOOK_MAX_CONSECUTIVE_FAILURES`, webhook otomatis dinonaktifkan.
 
 Delivery log dapat dicek dan diretry manual:
 
@@ -374,6 +414,7 @@ Syarat:
 | `data/api-clients.json` | Generated API clients dan hashed keys | Ya |
 | `data/api-usage.log` | API usage log per generated API client | Ya |
 | `data/audit.log` | Audit log terstruktur untuk admin/protected API | Ya |
+| `data/*.log.N` | Backup rotasi JSONL audit/usage/webhook delivery log | Ya, jika perlu histori audit/delivery |
 | `uploads` | Temporary upload | Tidak wajib, tetapi harus writable |
 
 ### 11.2 Backup
@@ -397,7 +438,10 @@ Monitor:
 - Disk usage folder `.wwebjs_auth`
 - Jumlah Chromium process
 - Status session WhatsApp
-- Webhook delivery failure
+- Webhook delivery failure, queue depth, dan dropped delivery
+- Send queue pending/rejected per session
+- Message cache size mendekati `MESSAGE_CACHE_MAX_ENTRIES`
+- Ukuran file JSONL dan backup rotasi
 - Error log Puppeteer
 - Latency endpoint send message
 
@@ -508,7 +552,7 @@ POST /sessions/:sessionId/queue/pause
 POST /sessions/:sessionId/queue/resume
 ```
 
-Gunakan `/metrics` untuk melihat ringkasan session, queue, dan memory process. Gunakan endpoint queue untuk pause/resume pengiriman WhatsApp per session ketika ada incident atau maintenance.
+Gunakan `/metrics` untuk melihat ringkasan session, send queue, webhook delivery queue, message cache, rotasi log, dan memory process. Gunakan endpoint queue untuk pause/resume pengiriman WhatsApp per session ketika ada incident atau maintenance.
 
 Scope generated API client yang dibutuhkan:
 
@@ -518,13 +562,13 @@ queue:read
 queue:manage
 ```
 
-Catatan: queue saat ini masih in-memory. Jika process restart, status pause dan chain queue hilang. Untuk multi-instance, gunakan Redis/BullMQ.
+Catatan: queue saat ini masih in-memory tetapi sudah bounded. Jika process restart, status pause dan chain queue hilang. Untuk multi-instance, gunakan Redis/BullMQ.
 
 ### 14.6 Reply atau Download Media Gagal
 
-Reply, reaction, download media, dan vote poll bergantung pada message object yang masih ada di runtime cache.
+Reply, reaction, download media, dan vote poll bergantung pada message object yang masih ada di runtime cache. Cache dibatasi oleh `MESSAGE_CACHE_MAX_ENTRIES` dan `MESSAGE_CACHE_TTL_MS`.
 
-Jika server restart, runtime cache hilang.
+Jika server restart atau entry expired/evicted, runtime cache hilang.
 
 Mitigasi production:
 
@@ -535,9 +579,12 @@ Mitigasi production:
 
 Periksa:
 
-- URL webhook bisa diakses dari server.
+- URL webhook bisa diakses dari server, bukan private/loopback/link-local/metadata address.
+- Host webhook masuk `OUTBOUND_URL_ALLOWED_HOSTS` bila allowlist diaktifkan.
+- Di production, gunakan HTTPS untuk webhook URL.
 - Target menerima POST JSON.
 - Timeout cukup.
+- Queue webhook delivery tidak penuh di `/metrics`.
 - Log error webhook.
 - `data/webhooks.json` berisi webhook aktif.
 
@@ -640,11 +687,10 @@ Langkah:
 
 Prioritas lanjutan:
 
-1. `express-rate-limit` untuk HTTP request limiting.
-2. Redis/BullMQ untuk durable send queue.
-3. Database untuk webhook config dan message metadata.
-4. Audit log untuk operasi sensitif.
-5. Metrics endpoint untuk Prometheus.
-6. RemoteAuth jika deployment di cloud/container ephemeral.
-7. Dead-letter storage untuk webhook gagal.
-8. Dashboard realtime via WebSocket/SSE.
+1. `express-rate-limit` untuk global/IP-based HTTP request limiting di depan generated client limit.
+2. Redis/BullMQ untuk durable send queue dan webhook delivery queue.
+3. Database untuk webhook config, message metadata, usage log, dan audit log.
+4. Prometheus-compatible metrics exporter.
+5. RemoteAuth jika deployment di cloud/container ephemeral.
+6. Dead-letter storage durable untuk webhook gagal.
+7. Dashboard realtime via WebSocket/SSE.

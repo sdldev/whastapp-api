@@ -1,30 +1,33 @@
-const fs = require('fs');
-const path = require('path');
 const { randomUUID } = require('crypto');
 const env = require('../config/env');
+const { appendJsonLine, readJsonLines } = require('../utils/jsonlFile');
 
 const auditLogFile = env.auditLogFile;
 
-const SENSITIVE_BODY_KEYS = new Set([
-  'apiKey',
-  'secret',
-  'data',
-  'base64',
+const SENSITIVE_BODY_KEY_PATTERNS = [
+  'apikey',
+  'api_key',
+  'authorization',
+  'credential',
   'password',
+  'secret',
   'token',
-  'keyHash'
-]);
-
-function ensureDir(filePath) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-}
+  'keyhash',
+  'base64',
+  'data'
+];
 
 function nowIso() {
   return new Date().toISOString();
 }
 
+function isSensitiveKey(key) {
+  const normalized = String(key || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  return SENSITIVE_BODY_KEY_PATTERNS.some((pattern) => normalized.includes(pattern.replace(/[^a-z0-9]/g, '')));
+}
+
 function redactValue(key, value) {
-  if (SENSITIVE_BODY_KEYS.has(String(key))) return '[REDACTED]';
+  if (isSensitiveKey(key)) return '[REDACTED]';
   if (typeof value === 'string' && value.length > 500) return `${value.slice(0, 120)}...[TRUNCATED:${value.length}]`;
   if (Array.isArray(value)) return value.map((item) => redactValue('', item));
   if (value && typeof value === 'object') return redactObject(value);
@@ -42,7 +45,6 @@ function redactObject(input) {
 
 function appendAuditLog(entry) {
   try {
-    ensureDir(auditLogFile);
     const payload = {
       id: entry.id || `audit_${randomUUID().replace(/-/g, '').slice(0, 20)}`,
       createdAt: entry.createdAt || nowIso(),
@@ -60,29 +62,20 @@ function appendAuditLog(entry) {
       requestId: entry.requestId || null,
       metadata: redactObject(entry.metadata || {})
     };
-    fs.appendFileSync(auditLogFile, `${JSON.stringify(payload)}\n`);
+    appendJsonLine(auditLogFile, payload);
     return payload;
   } catch (error) {
     return null;
   }
 }
 
-function parseLine(line) {
-  try {
-    return JSON.parse(line);
-  } catch (error) {
-    return null;
-  }
-}
-
 function listAuditLogs({ limit = 100, actorId, sessionId, action, statusCode } = {}) {
-  if (!fs.existsSync(auditLogFile)) return [];
   const safeLimit = Math.min(Math.max(Number(limit) || 100, 1), 1000);
-  const lines = fs.readFileSync(auditLogFile, 'utf8').split('\n').filter(Boolean);
+  const lines = readJsonLines(auditLogFile, { limit: Math.max(safeLimit * 10, 1000) });
   const entries = [];
 
   for (let index = lines.length - 1; index >= 0 && entries.length < safeLimit; index -= 1) {
-    const entry = parseLine(lines[index]);
+    const entry = lines[index];
     if (!entry) continue;
     if (actorId && entry.actorId !== actorId) continue;
     if (sessionId && entry.sessionId !== sessionId) continue;
